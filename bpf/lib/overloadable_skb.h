@@ -4,6 +4,7 @@
 #ifndef __LIB_OVERLOADABLE_SKB_H_
 #define __LIB_OVERLOADABLE_SKB_H_
 
+#include "lib/common.h"
 #include "linux/ip.h"
 
 static __always_inline __maybe_unused void
@@ -61,10 +62,27 @@ set_encrypt_key_mark(struct __sk_buff *ctx, __u8 key, __u32 node_id)
 	ctx->mark = or_encrypt_key(key) | node_id << 16;
 }
 
+/**
+ * set_cluster_id_mark - sets the cluster_id mark.
+ */
 static __always_inline __maybe_unused void
-set_encrypt_key_meta(struct __sk_buff *ctx, __u8 key, __u32 node_id)
+ctx_set_cluster_id_mark(struct __sk_buff *ctx, __u32 cluster_id)
 {
-	ctx->cb[CB_ENCRYPT_MAGIC] = or_encrypt_key(key) | node_id << 16;
+	ctx->mark |= cluster_id | MARK_MAGIC_CLUSTER_ID;
+}
+
+static __always_inline __maybe_unused __u32
+ctx_get_cluster_id_mark(struct __sk_buff *ctx)
+{
+	__u32 ret = 0;
+
+	if ((ctx->mark & MARK_MAGIC_CLUSTER_ID) != MARK_MAGIC_CLUSTER_ID)
+		return ret;
+
+	ret = ctx->mark & MARK_MAGIC_CLUSTER_ID_MASK;
+	ctx->mark &= ~(__u32)(MARK_MAGIC_CLUSTER_ID | MARK_MAGIC_CLUSTER_ID_MASK);
+
+	return ret;
 }
 
 static __always_inline __maybe_unused int
@@ -160,18 +178,20 @@ static __always_inline void ctx_snat_done_set(struct __sk_buff *ctx)
 	ctx->mark |= MARK_MAGIC_SNAT_DONE;
 }
 
-static __always_inline bool ctx_snat_done(struct __sk_buff *ctx)
+static __always_inline bool ctx_snat_done(const struct __sk_buff *ctx)
 {
 	return (ctx->mark & MARK_MAGIC_HOST_MASK) == MARK_MAGIC_SNAT_DONE;
 }
 
 #ifdef HAVE_ENCAP
 static __always_inline __maybe_unused int
-ctx_set_encap_info(struct __sk_buff *ctx, __u32 node_id, __u32 seclabel,
-		   __u32 dstid __maybe_unused, __u32 vni __maybe_unused,
-		   int *ifindex)
+ctx_set_encap_info(struct __sk_buff *ctx, __u32 src_ip,
+		   __be16 src_port __maybe_unused, __u32 node_id,
+		   __u32 seclabel, __u32 vni __maybe_unused,
+		   void *opt, __u32 opt_len, int *ifindex)
 {
 	struct bpf_tunnel_key key = {};
+	__u32 key_size = TUNNEL_KEY_WITHOUT_SRC_IP;
 	int ret;
 
 #ifdef ENABLE_VTEP
@@ -181,12 +201,22 @@ ctx_set_encap_info(struct __sk_buff *ctx, __u32 node_id, __u32 seclabel,
 #endif /* ENABLE_VTEP */
 		key.tunnel_id = seclabel;
 
+	if (src_ip != 0) {
+		key.local_ipv4 = bpf_ntohl(src_ip);
+		key_size = sizeof(key);
+	}
 	key.remote_ipv4 = node_id;
 	key.tunnel_ttl = IPDEFTTL;
 
-	ret = ctx_set_tunnel_key(ctx, &key, sizeof(key), BPF_F_ZERO_CSUM_TX);
+	ret = ctx_set_tunnel_key(ctx, &key, key_size, BPF_F_ZERO_CSUM_TX);
 	if (unlikely(ret < 0))
 		return DROP_WRITE_ERROR;
+
+	if (opt && opt_len > 0) {
+		ret = ctx_set_tunnel_opt(ctx, opt, opt_len);
+		if (unlikely(ret < 0))
+			return DROP_WRITE_ERROR;
+	}
 
 	*ifindex = ENCAP_IFINDEX;
 

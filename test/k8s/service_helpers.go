@@ -7,13 +7,13 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"net/netip"
 	"regexp"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/asaskevich/govalidator"
 	. "github.com/onsi/gomega"
 	v1 "k8s.io/api/core/v1"
 
@@ -57,16 +57,6 @@ func ciliumDelService(kubectl *helpers.Kubectl, id int64) {
 	}
 }
 
-func ciliumHasServiceIP(kubectl *helpers.Kubectl, pod, vip string) bool {
-	service := kubectl.CiliumExecMustSucceed(context.TODO(), pod, "cilium service list", "Cannot retrieve services on cilium Pod")
-	vip4 := fmt.Sprintf(" %s:", vip)
-	if strings.Contains(service.Stdout(), vip4) {
-		return true
-	}
-	vip6 := fmt.Sprintf(" [%s]:", vip)
-	return strings.Contains(service.Stdout(), vip6)
-}
-
 var newlineRegexp = regexp.MustCompile(`\n[ \t\n]*`)
 
 func trimNewlines(script string) string {
@@ -83,7 +73,7 @@ func testCommand(cmd string, count, fails int) string {
 	// Note: All newlines and the following whitespace is removed from the script below.
 	//       This requires explicit semicolons also at the ends of lines!
 	return trimNewlines(fmt.Sprintf(
-		`/bin/bash -c
+		`/usr/bin/env bash -c
 			'fails="";
 			id=$RANDOM;
 			for i in $(seq 1 %d); do
@@ -133,8 +123,11 @@ func testCurlFromPodWithSourceIPCheck(kubectl *helpers.Kubectl, clientPodLabel, 
 				"Can not connect to url %q from pod(%s)", url, pod)
 			if sourceIP != "" {
 				// Parse the IPs to avoid issues with 4-in-6 formats
-				outIP := net.ParseIP(strings.TrimSpace(strings.Split(res.Stdout(), "=")[1]))
-				srcIP := net.ParseIP(sourceIP)
+				ipStr := strings.TrimSpace(strings.Split(res.Stdout(), "=")[1])
+				outIP, err := netip.ParseAddr(ipStr)
+				ExpectWithOffset(1, err).Should(BeNil(), "Cannot parse IP %q", ipStr)
+				srcIP, err := netip.ParseAddr(sourceIP)
+				ExpectWithOffset(1, err).Should(BeNil(), "Cannot parse IP %q", sourceIP)
 				ExpectWithOffset(1, outIP).To(Equal(srcIP))
 			}
 		}
@@ -156,7 +149,8 @@ func testCurlFromPodsFail(kubectl *helpers.Kubectl, clientPodLabel, url string) 
 func curlClusterIPFromExternalHost(kubectl *helpers.Kubectl, ni *helpers.NodesInfo) *helpers.CmdRes {
 	clusterIP, _, err := kubectl.GetServiceHostPort(helpers.DefaultNamespace, appServiceName)
 	ExpectWithOffset(1, err).Should(BeNil(), "Cannot get service %s", appServiceName)
-	ExpectWithOffset(1, govalidator.IsIP(clusterIP)).Should(BeTrue(), "ClusterIP is not an IP")
+	_, err = netip.ParseAddr(clusterIP)
+	ExpectWithOffset(1, err).Should(BeNil(), "Cannot parse IP %q", clusterIP)
 	httpSVCURL := fmt.Sprintf("http://%s/", net.JoinHostPort(clusterIP, "80"))
 
 	By("testing external connectivity via cluster IP %s", clusterIP)
@@ -228,12 +222,20 @@ func testCurlFromOutsideWithLocalPort(kubectl *helpers.Kubectl, ni *helpers.Node
 			"Can not connect to service %q from outside cluster (%d/%d)", url, i, count)
 		if checkSourceIP {
 			// Parse the IPs to avoid issues with 4-in-6 formats
-			sourceIP := net.ParseIP(strings.TrimSpace(strings.Split(res.Stdout(), "=")[1]))
-			var outIP net.IP
-			if sourceIP.To4() != nil {
-				outIP = net.ParseIP(ni.OutsideIP)
-			} else {
-				outIP = net.ParseIP(ni.OutsideIPv6)
+			ipStr := strings.TrimSpace(strings.Split(res.Stdout(), "=")[1])
+			sourceIP, err := netip.ParseAddr(ipStr)
+			ExpectWithOffset(1, err).Should(BeNil(), "Cannot parse IP %q", ipStr)
+			var outIP netip.Addr
+			switch {
+			case sourceIP.Is4():
+				outIP, err = netip.ParseAddr(ni.OutsideIP)
+				ExpectWithOffset(1, err).Should(BeNil(), "Cannot parse IPv4 address %q", ni.OutsideIP)
+			case sourceIP.Is4In6():
+				outIP, err = netip.ParseAddr(ni.OutsideIP)
+				ExpectWithOffset(1, err).Should(BeNil(), "Cannot parse IPv4-mapped IPv6 address %q", ni.OutsideIP)
+			default:
+				outIP, err = netip.ParseAddr(ni.OutsideIPv6)
+				ExpectWithOffset(1, err).Should(BeNil(), "Cannot parse IPv6 address %q", ni.OutsideIP)
 			}
 			ExpectWithOffset(1, sourceIP).To(Equal(outIP))
 		}
@@ -512,7 +514,6 @@ func testNodePort(kubectl *helpers.Kubectl, ni *helpers.NodesInfo, bpfNodePort, 
 				getTFTPLink(ni.PrimaryK8s2IPv6, v6Data.Spec.Ports[1].NodePort),
 			)
 		}
-
 	}
 
 	count := 10
@@ -796,17 +797,15 @@ func testSessionAffinity(kubectl *helpers.Kubectl, ni *helpers.NodesInfo, fromOu
 	}
 }
 
-func testExternalTrafficPolicyLocal(kubectl *helpers.Kubectl, ni *helpers.NodesInfo, ipsec bool) {
+func testExternalTrafficPolicyLocal(kubectl *helpers.Kubectl, ni *helpers.NodesInfo) {
 	var (
 		data    v1.Service
 		httpURL string
 		tftpURL string
 
-		// Service backends on both nodes
 		localNodePortSvcIPv4 = "test-nodeport-local"
 		localNodePortSvcIPv6 = "test-nodeport-local-ipv6"
 
-		// Service backend only on k8s2 node
 		localNodePortK8s2SvcIpv4 = "test-nodeport-local-k8s2"
 		localNodePortK8s2SvcIpv6 = "test-nodeport-local-k8s2-ipv6"
 	)
@@ -867,17 +866,13 @@ func testExternalTrafficPolicyLocal(kubectl *helpers.Kubectl, ni *helpers.NodesI
 			testCurlFromOutside(kubectl, ni, tftpURL, count, true)
 		}
 
+		// Local requests should be load-balanced on kube-proxy 1.15+.
+		// See kubernetes/kubernetes#77523 for the PR which introduced this
+		// behavior on the iptables-backend for kube-proxy.
 		httpURL = getHTTPLink(node.node1IP, data.Spec.Ports[0].NodePort)
 		tftpURL = getTFTPLink(node.node1IP, data.Spec.Ports[1].NodePort)
-
-		// Until https://github.com/cilium/cilium/issues/23481 has been fixed
-		if !ipsec {
-			// Local requests should be load-balanced on kube-proxy 1.15+.
-			// See kubernetes/kubernetes#77523 for the PR which introduced this
-			// behavior on the iptables-backend for kube-proxy.
-			testCurlFromPodInHostNetNS(kubectl, httpURL, count, 0, ni.K8s1NodeName)
-			testCurlFromPodInHostNetNS(kubectl, tftpURL, count, 0, ni.K8s1NodeName)
-		}
+		testCurlFromPodInHostNetNS(kubectl, httpURL, count, 0, ni.K8s1NodeName)
+		testCurlFromPodInHostNetNS(kubectl, tftpURL, count, 0, ni.K8s1NodeName)
 		// In-cluster connectivity from k8s2 to k8s1 IP will still work with
 		// SocketLB (regardless of if we are running with or
 		// without kube-proxy) since we'll hit the wildcard rule in bpf_sock

@@ -48,7 +48,7 @@ use ``operator.prometheus.enabled=true``.
      --set operator.prometheus.enabled=true
 
 The ports can be configured via ``prometheus.port``,
-``proxy.prometheus.port``, or ``operator.prometheus.port`` respectively.
+``envoy.prometheus.port``, or ``operator.prometheus.port`` respectively.
 
 When metrics are enabled, all Cilium components will have the following
 annotations. They can be used to signal Prometheus whether to scrape metrics:
@@ -174,6 +174,39 @@ only scrape exemplars when the `exemplars storage feature is enabled
 OpenMetrics imposes a few additional requirements on metrics names and labels,
 so this functionality is currently opt-in, though we believe all of the Hubble
 metrics conform to the OpenMetrics requirements.
+
+
+Cluster Mesh API Server Metrics
+===============================
+
+Cluster Mesh API Server metrics provide insights into both the state of the
+``clustermesh-apiserver`` process and the sidecar etcd instance.
+Cluster Mesh API Server metrics are exported under the ``cilium_clustermesh_apiserver_``
+Prometheus namespace. Etcd metrics are exported under the ``etcd_`` Prometheus namespace.
+
+
+Installation
+------------
+
+You can enable metrics for ``clustermesh-apiserver`` with the Helm value
+``clustermesh.apiserver.metrics.enabled=true``.
+To enable metrics for the sidecar etcd instance, use
+``clustermesh.apiserver.metrics.etcd.enabled=true``.
+
+.. parsed-literal::
+
+   helm install cilium |CHART_RELEASE| \\
+     --namespace kube-system \\
+     --set clustermesh.useAPIServer=true \\
+     --set clustermesh.apiserver.metrics.enabled=true \\
+     --set clustermesh.apiserver.metrics.etcd.enabled=true
+
+The ports can be configured via ``clustermesh.apiserver.metrics.port`` and
+``clustermesh.apiserver.metrics.etcd.port`` respectively.
+
+You can automatically create a
+`Prometheus Operator <https://github.com/prometheus-operator/prometheus-operator>`_
+``ServiceMonitor`` by setting ``clustermesh.apiserver.metrics.serviceMonitor.enabled=true``.
 
 Example Prometheus & Grafana Deployment
 =======================================
@@ -307,7 +340,7 @@ Name                                       Labels                               
 ========================================== ===================================================================== ========== ========================================================
 ``bpf_syscall_duration_seconds``           ``operation``, ``outcome``                                            Disabled   Duration of eBPF system call performed
 ``bpf_map_ops_total``                      ``mapName`` (deprecated), ``map_name``, ``operation``, ``outcome``    Enabled    Number of eBPF map operations performed. ``mapName`` is deprecated and will be removed in 1.10. Use ``map_name`` instead.
-``bpf_map_pressure``                       ``map_name``                                                          Disabled   Map pressure defined as fill-up ratio of the map. Policy maps are exceptionally reported only when ratio is over 0.1.
+``bpf_map_pressure``                       ``map_name``                                                          Enabled    Map pressure defined as a ratio of the map usage compared to its size. Policy map metrics are only reported when the ratio is over 0.1, ie 10% full.
 ``bpf_maps_virtual_memory_max_bytes``                                                                            Enabled    Max memory used by eBPF maps installed in the system
 ``bpf_progs_virtual_memory_max_bytes``                                                                           Enabled    Max memory used by eBPF programs installed in the system
 ========================================== ===================================================================== ========== ========================================================
@@ -342,6 +375,7 @@ Name                                       Labels                               
 ``policy_import_errors_total``                                                                Enabled    Number of times a policy import has failed
 ``policy_change_total``                                                                       Enabled    Number of policy changes by outcome
 ``policy_endpoint_enforcement_status``                                                        Enabled    Number of endpoints labeled by policy enforcement status
+``policy_implementation_delay``            ``source``                                         Enabled    Time in seconds between a policy change and it being fully deployed into the datapath, labeled by the policy's source
 ========================================== ================================================== ========== ========================================================
 
 Policy L7 (HTTP/Kafka)
@@ -425,8 +459,10 @@ KVstore
 Name                                     Labels                                       Default    Description
 ======================================== ============================================ ========== ========================================================
 ``kvstore_operations_duration_seconds``  ``action``, ``kind``, ``outcome``, ``scope`` Enabled    Duration of kvstore operation
-``kvstore_events_queue_seconds``         ``action``, ``scope``                        Enabled    Duration of seconds of time received event was blocked before it could be queued
+``kvstore_events_queue_seconds``         ``action``, ``scope``                        Enabled    Seconds waited before a received event was queued
 ``kvstore_quorum_errors_total``          ``error``                                    Enabled    Number of quorum errors
+``kvstore_sync_queue_size``              ``scope``, ``source_cluster``                Enabled    Number of elements queued for synchronization in the kvstore
+``kvstore_initial_sync_completed``       ``scope``, ``source_cluster``, ``action``    Enabled    Whether the initial synchronization from/to the kvstore has completed
 ======================================== ============================================ ========== ========================================================
 
 Agent
@@ -507,6 +543,9 @@ Name                                     Labels                                 
 ``ipam_resync_total``                                                                                      Enabled    Number of synchronization operations with external IPAM API
 ``ipam_api_duration_seconds``            ``operation``, ``response_code``                                  Enabled    Duration of interactions with external IPAM API.
 ``ipam_api_rate_limit_duration_seconds`` ``operation``                                                     Enabled    Duration of rate limiting while accessing external IPAM API
+``ipam_available_ips``                   ``target_node``                                                   Enabled    Number of available IPs on a node (taking into account plugin specific NIC/Address limits).
+``ipam_used_ips``                        ``target_node``                                                   Enabled    Number of currently used IPs on a node.
+``ipam_needed_ips``                      ``target_node``                                                   Enabled    Number of IPs needed to satisfy allocation on a node.
 ======================================== ================================================================= ========== ========================================================
 
 Hubble
@@ -626,6 +665,26 @@ Exported Metrics
 ^^^^^^^^^^^^^^^^
 
 Hubble metrics are exported under the ``hubble_`` Prometheus namespace.
+
+lost events
+~~~~~~~~~~~
+
+This metric, unlike other ones, is not directly tied to network flows. It's enabled if any of the other metrics is enabled.
+
+================================ ======================================== ========== ==================================================
+Name                             Labels                                   Default    Description
+================================ ======================================== ========== ==================================================
+``lost_events_total``            ``source``                               Enabled    Number of lost events
+================================ ======================================== ========== ==================================================
+
+Labels
+""""""
+
+``source`` identifies the source of lost events, one of:
+- ``perf_event_ring_buffer``
+- ``observer_events_queue``
+- ``hubble_ring_buffer``
+
 
 ``dns``
 ~~~~~~~
@@ -831,3 +890,33 @@ Options
 """""""
 
 This metric supports :ref:`Context Options<hubble_context_options>`.
+
+clustermesh-apiserver
+---------------------
+
+Configuration
+^^^^^^^^^^^^^
+
+To expose any metrics, invoke ``clustermesh-apiserver`` with the
+``--prometheus-serve-addr`` option. This option takes a ``IP:Port`` pair but
+passing an empty IP (e.g. ``:9962``) will bind the server to all available
+interfaces (there is usually only one in a container).
+
+Exported Metrics
+^^^^^^^^^^^^^^^^
+
+All metrics are exported under the ``cilium_clustermesh_apiserver_``
+Prometheus namespace.
+
+KVstore
+~~~~~~~
+
+======================================== ============================================ ========================================================
+Name                                     Labels                                       Description
+======================================== ============================================ ========================================================
+``kvstore_operations_duration_seconds``  ``action``, ``kind``, ``outcome``, ``scope`` Duration of kvstore operation
+``kvstore_events_queue_seconds``         ``action``, ``scope``                        Seconds waited before a received event was queued
+``kvstore_quorum_errors_total``          ``error``                                    Number of quorum errors
+``kvstore_sync_queue_size``              ``scope``, ``source_cluster``                Number of elements queued for synchronization in the kvstore
+``kvstore_initial_sync_completed``       ``scope``, ``source_cluster``, ``action``    Whether the initial synchronization from/to the kvstore has completed
+======================================== ============================================ ========================================================

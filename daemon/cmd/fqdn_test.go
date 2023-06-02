@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright Authors of Cilium
 
-//go:build integration_tests
-
 package cmd
 
 import (
@@ -13,9 +11,8 @@ import (
 	"sync"
 	"time"
 
+	. "github.com/cilium/checkmate"
 	miekgdns "github.com/miekg/dns"
-	. "gopkg.in/check.v1"
-	k8sCache "k8s.io/client-go/tools/cache"
 
 	"github.com/cilium/cilium/pkg/allocator"
 	"github.com/cilium/cilium/pkg/checker"
@@ -38,6 +35,7 @@ import (
 	"github.com/cilium/cilium/pkg/policy/api"
 	"github.com/cilium/cilium/pkg/proxy/accesslog"
 	"github.com/cilium/cilium/pkg/proxy/logger"
+	"github.com/cilium/cilium/pkg/testutils"
 	testidentity "github.com/cilium/cilium/pkg/testutils/identity"
 )
 
@@ -48,6 +46,8 @@ type DaemonFQDNSuite struct {
 var _ = Suite(&DaemonFQDNSuite{})
 
 func (ds *DaemonFQDNSuite) SetUpSuite(c *C) {
+	testutils.IntegrationCheck(c)
+
 	re.InitRegexCompileLRU(defaults.FQDNRegexCompileLRUSize)
 }
 
@@ -110,7 +110,7 @@ func (f *FakeRefcountingIdentityAllocator) IdentityReferenceCounter() counter.In
 
 func (f *FakeRefcountingIdentityAllocator) Close() {
 }
-func (f *FakeRefcountingIdentityAllocator) InitIdentityAllocator(versioned.Interface, k8sCache.Store) <-chan struct{} {
+func (f *FakeRefcountingIdentityAllocator) InitIdentityAllocator(versioned.Interface) <-chan struct{} {
 	return nil
 }
 func (f *FakeRefcountingIdentityAllocator) WatchRemoteIdentities(string, kvstore.BackendOperations) (*allocator.RemoteCache, error) {

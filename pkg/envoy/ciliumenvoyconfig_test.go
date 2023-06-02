@@ -4,7 +4,6 @@
 package envoy
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -21,7 +20,7 @@ import (
 	"github.com/cilium/cilium/pkg/bpf"
 	cilium_v2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
 
-	. "gopkg.in/check.v1"
+	. "github.com/cilium/checkmate"
 )
 
 type JSONSuite struct{}
@@ -43,7 +42,7 @@ func NewMockPortAllocator() *MockPortAllocator {
 	}
 }
 
-func (m *MockPortAllocator) AllocateProxyPort(name string, ingress bool) (uint16, error) {
+func (m *MockPortAllocator) AllocateProxyPort(name string, ingress, localOnly bool) (uint16, error) {
 	if mp, exists := m.ports[name]; exists {
 		return mp.port, nil
 	}
@@ -101,6 +100,8 @@ resources:
               route:
                 cluster: "envoy-admin"
                 prefix_rewrite: "/stats/prometheus"
+        use_remote_address: true
+        skip_xff_append: true
         http_filters:
         - name: envoy.filters.http.router
 `
@@ -139,6 +140,8 @@ spec:
           codec_type: AUTO
           rds:
             route_config_name: local_route
+          use_remote_address: true
+          skip_xff_append: true
           http_filters:
           - name: envoy.filters.http.router
       transport_socket:
@@ -157,9 +160,6 @@ func (s *JSONSuite) TestCiliumEnvoyConfig(c *C) {
 	portAllocator := NewMockPortAllocator()
 	jsonBytes, err := yaml.YAMLToJSON([]byte(ciliumEnvoyConfig))
 	c.Assert(err, IsNil)
-	// var buf bytes.Buffer
-	// json.Indent(&buf, jsonBytes, "", "\t")
-	// fmt.Printf("JSON spec:\n%s\n", buf.String())
 	cec := &cilium_v2.CiliumEnvoyConfig{}
 	err = json.Unmarshal(jsonBytes, cec)
 	c.Assert(err, IsNil)
@@ -167,7 +167,7 @@ func (s *JSONSuite) TestCiliumEnvoyConfig(c *C) {
 	c.Assert(cec.Spec.Resources, HasLen, 1)
 	c.Assert(cec.Spec.Resources[0].TypeUrl, Equals, "type.googleapis.com/envoy.config.listener.v3.Listener")
 
-	resources, err := ParseResources("namespace", "name", cec.Spec.Resources, true, portAllocator, false)
+	resources, err := ParseResources("namespace", "name", cec.Spec.Resources, true, portAllocator, false, false)
 	c.Assert(err, IsNil)
 	c.Assert(resources.Listeners, HasLen, 1)
 	c.Assert(resources.Listeners[0].Name, Equals, "namespace/name/envoy-prometheus-metrics-listener")
@@ -240,6 +240,8 @@ spec:
           codec_type: AUTO
           rds:
             route_config_name: local_route
+          use_remote_address: true
+          skip_xff_append: true
           http_filters:
           - name: envoy.filters.http.router
 `
@@ -248,9 +250,6 @@ func (s *JSONSuite) TestCiliumEnvoyConfigValidation(c *C) {
 	portAllocator := NewMockPortAllocator()
 	jsonBytes, err := yaml.YAMLToJSON([]byte(ciliumEnvoyConfigInvalid))
 	c.Assert(err, IsNil)
-	// var buf bytes.Buffer
-	// json.Indent(&buf, jsonBytes, "", "\t")
-	// fmt.Printf("JSON spec:\n%s\n", buf.String())
 	cec := &cilium_v2.CiliumEnvoyConfig{}
 	err = json.Unmarshal(jsonBytes, cec)
 	c.Assert(err, IsNil)
@@ -258,7 +257,7 @@ func (s *JSONSuite) TestCiliumEnvoyConfigValidation(c *C) {
 	c.Assert(cec.Spec.Resources, HasLen, 1)
 	c.Assert(cec.Spec.Resources[0].TypeUrl, Equals, "type.googleapis.com/envoy.config.listener.v3.Listener")
 
-	resources, err := ParseResources("namespace", "name", cec.Spec.Resources, false, portAllocator, false)
+	resources, err := ParseResources("namespace", "name", cec.Spec.Resources, false, portAllocator, false, false)
 	c.Assert(err, IsNil)
 	c.Assert(resources.Listeners, HasLen, 1)
 	c.Assert(resources.Listeners[0].Name, Equals, "namespace/name/envoy-prometheus-metrics-listener")
@@ -291,7 +290,7 @@ func (s *JSONSuite) TestCiliumEnvoyConfigValidation(c *C) {
 	//
 	// Same with validation fails
 	//
-	resources, err = ParseResources("namespace", "name", cec.Spec.Resources, true, portAllocator, false)
+	resources, err = ParseResources("namespace", "name", cec.Spec.Resources, true, portAllocator, false, false)
 	c.Assert(err, Not(IsNil))
 }
 
@@ -313,6 +312,8 @@ spec:
           codec_type: AUTO
           rds:
             route_config_name: local_route
+          use_remote_address: true
+          skip_xff_append: true
           http_filters:
           - name: envoy.filters.http.router
 `
@@ -321,9 +322,6 @@ func (s *JSONSuite) TestCiliumEnvoyConfigNoAddress(c *C) {
 	portAllocator := NewMockPortAllocator()
 	jsonBytes, err := yaml.YAMLToJSON([]byte(ciliumEnvoyConfigNoAddress))
 	c.Assert(err, IsNil)
-	// var buf bytes.Buffer
-	// json.Indent(&buf, jsonBytes, "", "\t")
-	// fmt.Printf("JSON spec:\n%s\n", buf.String())
 	cec := &cilium_v2.CiliumEnvoyConfig{}
 	err = json.Unmarshal(jsonBytes, cec)
 	c.Assert(err, IsNil)
@@ -331,7 +329,7 @@ func (s *JSONSuite) TestCiliumEnvoyConfigNoAddress(c *C) {
 	c.Assert(cec.Spec.Resources, HasLen, 1)
 	c.Assert(cec.Spec.Resources[0].TypeUrl, Equals, "type.googleapis.com/envoy.config.listener.v3.Listener")
 
-	resources, err := ParseResources("namespace", "name", cec.Spec.Resources, true, portAllocator, false)
+	resources, err := ParseResources("namespace", "name", cec.Spec.Resources, true, portAllocator, false, false)
 	c.Assert(err, IsNil)
 	c.Assert(resources.Listeners, HasLen, 1)
 	c.Assert(resources.Listeners[0].Name, Equals, "namespace/name/envoy-prometheus-metrics-listener")
@@ -388,6 +386,8 @@ spec:
           codec_type: AUTO
           rds:
             route_config_name: local_route
+          use_remote_address: true
+          skip_xff_append: true
           http_filters:
           - name: envoy.filters.http.router
   - "@type": type.googleapis.com/envoy.config.route.v3.RouteConfiguration
@@ -436,16 +436,13 @@ func (s *JSONSuite) TestCiliumEnvoyConfigMulti(c *C) {
 	portAllocator := NewMockPortAllocator()
 	jsonBytes, err := yaml.YAMLToJSON([]byte(ciliumEnvoyConfigMulti))
 	c.Assert(err, IsNil)
-	// var buf bytes.Buffer
-	// json.Indent(&buf, jsonBytes, "", "\t")
-	// fmt.Printf("JSON spec:\n%s\n", buf.String())
 	cec := &cilium_v2.CiliumEnvoyConfig{}
 	err = json.Unmarshal(jsonBytes, cec)
 	c.Assert(err, IsNil)
 	c.Assert(cec.Spec.Resources, HasLen, 5)
 	c.Assert(cec.Spec.Resources[0].TypeUrl, Equals, "type.googleapis.com/envoy.config.listener.v3.Listener")
 
-	resources, err := ParseResources("namespace", "name", cec.Spec.Resources, true, portAllocator, false)
+	resources, err := ParseResources("namespace", "name", cec.Spec.Resources, true, portAllocator, false, false)
 	c.Assert(err, IsNil)
 	c.Assert(resources.Listeners, HasLen, 1)
 	c.Assert(resources.Listeners[0].Name, Equals, "namespace/name/multi-resource-listener")
@@ -599,10 +596,6 @@ func (s *JSONSuite) TestCiliumEnvoyConfigTCPProxy(c *C) {
 	jsonBytes, err := yaml.YAMLToJSON([]byte(ciliumEnvoyConfigTCPProxy))
 	c.Assert(err, IsNil)
 
-	var buf bytes.Buffer
-	json.Indent(&buf, jsonBytes, "", "\t")
-	fmt.Printf("JSON spec:\n%s\n", buf.String())
-
 	cec := &cilium_v2.CiliumEnvoyConfig{}
 	err = json.Unmarshal(jsonBytes, cec)
 	c.Assert(err, IsNil)
@@ -610,7 +603,7 @@ func (s *JSONSuite) TestCiliumEnvoyConfigTCPProxy(c *C) {
 	c.Assert(cec.Spec.Resources, HasLen, 2)
 	c.Assert(cec.Spec.Resources[0].TypeUrl, Equals, "type.googleapis.com/envoy.config.listener.v3.Listener")
 
-	resources, err := ParseResources("namespace", "name", cec.Spec.Resources, true, portAllocator, false)
+	resources, err := ParseResources("namespace", "name", cec.Spec.Resources, true, portAllocator, false, true)
 	c.Assert(err, IsNil)
 	c.Assert(resources.Listeners, HasLen, 1)
 	c.Assert(resources.Listeners[0].Address, Not(IsNil))
@@ -628,9 +621,9 @@ func (s *JSONSuite) TestCiliumEnvoyConfigTCPProxy(c *C) {
 	c.Assert(ok, Equals, true)
 	c.Assert(lf, Not(IsNil))
 	c.Assert(lf.IsIngress, Equals, false)
-	c.Assert(lf.MayUseOriginalSourceAddress, Equals, true)
-	c.Assert(lf.BpfRoot, Equals, bpf.GetMapRoot())
-	c.Assert(lf.EgressMarkSourceEndpointId, Equals, false)
+	c.Assert(lf.UseOriginalSourceAddress, Equals, true)
+	c.Assert(lf.BpfRoot, Equals, bpf.BPFFSRoot())
+	c.Assert(lf.IsL7Lb, Equals, false)
 
 	c.Assert(resources.Listeners[0].FilterChains, HasLen, 1)
 	chain := resources.Listeners[0].FilterChains[0]
@@ -704,6 +697,8 @@ spec:
                   - upgrade_type: CONNECT
                     connect_config:
                       allow_post: true
+          use_remote_address: true
+          skip_xff_append: true
           http_filters:
           - name: envoy.filters.http.router
           http2_protocol_options:
@@ -731,10 +726,6 @@ func (s *JSONSuite) TestCiliumEnvoyConfigTCPProxyTermination(c *C) {
 	jsonBytes, err := yaml.YAMLToJSON([]byte(ciliumEnvoyConfigTCPProxyTermination))
 	c.Assert(err, IsNil)
 
-	var buf bytes.Buffer
-	json.Indent(&buf, jsonBytes, "", "\t")
-	fmt.Printf("JSON spec:\n%s\n", buf.String())
-
 	cec := &cilium_v2.CiliumEnvoyConfig{}
 	err = json.Unmarshal(jsonBytes, cec)
 	c.Assert(err, IsNil)
@@ -742,7 +733,7 @@ func (s *JSONSuite) TestCiliumEnvoyConfigTCPProxyTermination(c *C) {
 	c.Assert(cec.Spec.Resources, HasLen, 2)
 	c.Assert(cec.Spec.Resources[0].TypeUrl, Equals, "type.googleapis.com/envoy.config.listener.v3.Listener")
 
-	resources, err := ParseResources("namespace", "name", cec.Spec.Resources, true, portAllocator, true)
+	resources, err := ParseResources("namespace", "name", cec.Spec.Resources, true, portAllocator, true, false)
 	c.Assert(err, IsNil)
 	c.Assert(resources.Listeners, HasLen, 1)
 	c.Assert(resources.Listeners[0].Address, Not(IsNil))
@@ -760,9 +751,9 @@ func (s *JSONSuite) TestCiliumEnvoyConfigTCPProxyTermination(c *C) {
 	c.Assert(ok, Equals, true)
 	c.Assert(lf, Not(IsNil))
 	c.Assert(lf.IsIngress, Equals, false)
-	c.Assert(lf.MayUseOriginalSourceAddress, Equals, false)
-	c.Assert(lf.BpfRoot, Equals, bpf.GetMapRoot())
-	c.Assert(lf.EgressMarkSourceEndpointId, Equals, true)
+	c.Assert(lf.UseOriginalSourceAddress, Equals, false)
+	c.Assert(lf.BpfRoot, Equals, bpf.BPFFSRoot())
+	c.Assert(lf.IsL7Lb, Equals, true)
 
 	c.Assert(resources.Listeners[0].FilterChains, HasLen, 1)
 	chain := resources.Listeners[0].FilterChains[0]

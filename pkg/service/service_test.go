@@ -8,8 +8,8 @@ import (
 	"net"
 	"testing"
 
+	. "github.com/cilium/checkmate"
 	"github.com/stretchr/testify/assert"
-	. "gopkg.in/check.v1"
 
 	"github.com/cilium/cilium/pkg/checker"
 	"github.com/cilium/cilium/pkg/cidr"
@@ -190,6 +190,13 @@ var (
 	}
 	backends4 = []*lb.Backend{
 		lb.NewBackend(0, lb.TCP, cmtypes.MustParseAddrCluster("10.0.0.4"), 8080),
+	}
+	backends5 = []*lb.Backend{
+		lb.NewBackend(0, lb.TCP, cmtypes.MustParseAddrCluster("10.0.0.5"), 8080),
+		lb.NewBackend(0, lb.TCP, cmtypes.MustParseAddrCluster("10.0.0.6"), 8080),
+	}
+	backends6 = []*lb.Backend{
+		lb.NewBackend(0, lb.TCP, cmtypes.MustParseAddrCluster("10.0.0.7"), 8080),
 	}
 )
 
@@ -455,6 +462,28 @@ func (m *ManagerTestSuite) testUpsertAndDeleteService(c *C) {
 	c.Assert(found, Equals, true)
 	c.Assert(len(m.lbmap.ServiceByID), Equals, 0)
 	c.Assert(len(m.lbmap.BackendByID), Equals, 0)
+
+	// Should ignore the source range if it does not match FE's ip family
+	cidr1, err = cidr.ParseCIDR("fd00::/8")
+	c.Assert(err, IsNil)
+	cidr2, err = cidr.ParseCIDR("192.168.1.0/24")
+	c.Assert(err, IsNil)
+
+	p4 := &lb.SVC{
+		Frontend:                  frontend1,
+		Backends:                  backends1,
+		Type:                      lb.SVCTypeLoadBalancer,
+		ExtTrafficPolicy:          lb.SVCTrafficPolicyCluster,
+		IntTrafficPolicy:          lb.SVCTrafficPolicyCluster,
+		SessionAffinity:           true,
+		SessionAffinityTimeoutSec: 300,
+		Name:                      lb.ServiceName{Name: "svc3", Namespace: "ns3"},
+		LoadBalancerSourceRanges:  []*cidr.CIDR{cidr1, cidr2},
+	}
+	created, id4, err := m.svc.UpsertService(p4)
+	c.Assert(created, Equals, true)
+	c.Assert(err, IsNil)
+	c.Assert(len(m.lbmap.SourceRanges[uint16(id4)]), Equals, 1)
 }
 
 func (m *ManagerTestSuite) TestRestoreServices(c *C) {
@@ -971,6 +1000,87 @@ func (m *ManagerTestSuite) TestUpsertServiceWithTerminatingBackends(c *C) {
 		c.Assert(m.lbmap.AffinityMatch[uint16(id1)][bID], Equals, struct{}{})
 	}
 	c.Assert(m.lbmap.DummyMaglevTable[uint16(id1)], Equals, len(backends1))
+
+	// Delete terminating backends.
+	p.Backends = []*lb.Backend{}
+
+	created, id1, err = m.svc.UpsertService(p)
+
+	c.Assert(err, IsNil)
+	c.Assert(created, Equals, false)
+	c.Assert(id1, Equals, lb.ID(1))
+	c.Assert(len(m.lbmap.ServiceByID[uint16(id1)].Backends), Equals, 0)
+	c.Assert(len(m.lbmap.BackendByID), Equals, 0)
+	c.Assert(m.svc.svcByID[id1].svcName.Name, Equals, "svc1")
+	c.Assert(m.svc.svcByID[id1].svcName.Namespace, Equals, "ns1")
+	c.Assert(len(m.lbmap.AffinityMatch[uint16(id1)]), Equals, 0)
+}
+
+// TestUpsertServiceWithOnlyTerminatingBackends tests that a terminating backend is still
+// used if there are not active backends.
+func (m *ManagerTestSuite) TestUpsertServiceWithOnlyTerminatingBackends(c *C) {
+	option.Config.NodePortAlg = option.NodePortAlgMaglev
+	backends := backends1 // There are 2 backends
+	p := &lb.SVC{
+		Frontend:                  frontend1,
+		Backends:                  backends,
+		Type:                      lb.SVCTypeNodePort,
+		ExtTrafficPolicy:          lb.SVCTrafficPolicyCluster,
+		IntTrafficPolicy:          lb.SVCTrafficPolicyCluster,
+		SessionAffinity:           true,
+		SessionAffinityTimeoutSec: 100,
+		Name:                      lb.ServiceName{Name: "svc1", Namespace: "ns1"},
+	}
+
+	// Reset state as backends are pointers to lb.Backend
+	p.Backends[0].State = lb.BackendStateActive
+	p.Backends[1].State = lb.BackendStateActive
+
+	created, id1, err := m.svc.UpsertService(p)
+
+	c.Assert(err, IsNil)
+	c.Assert(created, Equals, true)
+	c.Assert(id1, Equals, lb.ID(1))
+	c.Assert(len(m.lbmap.ServiceByID[uint16(id1)].Backends), Equals, 2)
+	c.Assert(m.lbmap.SvcActiveBackendsCount[uint16(id1)], Equals, 2)
+	c.Assert(m.svc.svcByID[id1].svcName.Name, Equals, "svc1")
+	c.Assert(m.svc.svcByID[id1].svcName.Namespace, Equals, "ns1")
+
+	// The terminating backend should not be considered
+	p.Backends[1].State = lb.BackendStateTerminating
+
+	created, id1, err = m.svc.UpsertService(p)
+
+	c.Assert(err, IsNil)
+	c.Assert(created, Equals, false)
+	c.Assert(id1, Equals, lb.ID(1))
+	c.Assert(len(m.lbmap.ServiceByID[uint16(id1)].Backends), Equals, 2)
+	c.Assert(len(m.lbmap.BackendByID), Equals, 2)
+	c.Assert(m.lbmap.SvcActiveBackendsCount[uint16(id1)], Equals, 1)
+
+	// Delete terminating backends.
+	p.Backends = p.Backends[:1]
+
+	created, id1, err = m.svc.UpsertService(p)
+
+	c.Assert(err, IsNil)
+	c.Assert(created, Equals, false)
+	c.Assert(id1, Equals, lb.ID(1))
+	c.Assert(len(m.lbmap.ServiceByID[uint16(id1)].Backends), Equals, 1)
+	c.Assert(len(m.lbmap.BackendByID), Equals, 1)
+	c.Assert(len(m.lbmap.AffinityMatch[uint16(id1)]), Equals, 1)
+
+	// The terminating backend should be considered since there are no more active
+	p.Backends[0].State = lb.BackendStateTerminating
+
+	created, id1, err = m.svc.UpsertService(p)
+
+	c.Assert(err, IsNil)
+	c.Assert(created, Equals, false)
+	c.Assert(id1, Equals, lb.ID(1))
+	c.Assert(len(m.lbmap.ServiceByID[uint16(id1)].Backends), Equals, 1)
+	c.Assert(len(m.lbmap.BackendByID), Equals, 1)
+	c.Assert(m.lbmap.SvcActiveBackendsCount[uint16(id1)], Equals, 0)
 
 	// Delete terminating backends.
 	p.Backends = []*lb.Backend{}
@@ -1717,4 +1827,78 @@ func (m *ManagerTestSuite) TestTrafficPolicy(c *C) {
 	found, err = m.svc.DeleteServiceByID(lb.ServiceID(id2))
 	c.Assert(err, IsNil)
 	c.Assert(found, Equals, true)
+}
+
+// Tests whether delete service handles non-active backends.
+func (m *ManagerTestSuite) TestDeleteServiceWithTerminatingBackends(c *C) {
+	backends := backends5
+	backends[0].State = lb.BackendStateTerminating
+	p := &lb.SVC{
+		Frontend: frontend1,
+		Backends: backends,
+		Name:     lb.ServiceName{Name: "svc1", Namespace: "ns1"},
+	}
+
+	created, id1, err := m.svc.UpsertService(p)
+
+	c.Assert(err, IsNil)
+	c.Assert(created, Equals, true)
+	c.Assert(id1, Equals, lb.ID(1))
+	c.Assert(len(m.lbmap.ServiceByID[uint16(id1)].Backends), Equals, 2)
+	c.Assert(len(m.lbmap.BackendByID), Equals, 2)
+	c.Assert(m.svc.svcByID[id1].svcName, Equals, lb.ServiceName{Name: "svc1", Namespace: "ns1"})
+
+	// Delete service.
+	found, err := m.svc.DeleteServiceByID(lb.ServiceID(id1))
+
+	c.Assert(err, IsNil)
+	c.Assert(found, Equals, true)
+	c.Assert(len(m.lbmap.ServiceByID), Equals, 0)
+	c.Assert(len(m.lbmap.BackendByID), Equals, 0)
+}
+
+func (m *ManagerTestSuite) TestRestoreServicesWithLeakedBackends(c *C) {
+	backends := make([]*lb.Backend, len(backends1))
+	backends[0] = backends1[0].DeepCopy()
+	backends[1] = backends1[1].DeepCopy()
+	p1 := &lb.SVC{
+		Frontend: frontend1,
+		Backends: backends,
+		Type:     lb.SVCTypeClusterIP,
+		Name:     lb.ServiceName{Name: "svc1", Namespace: "ns1"},
+	}
+
+	_, id1, err1 := m.svc.UpsertService(p1)
+
+	c.Assert(err1, IsNil)
+	c.Assert(id1, Equals, lb.ID(1))
+	c.Assert(len(m.lbmap.ServiceByID[uint16(id1)].Backends), Equals, len(backends))
+	c.Assert(len(m.lbmap.BackendByID), Equals, len(backends))
+
+	// Simulate leaked backends with various leaked scenarios.
+	// Backend2 is a duplicate leaked backend with the same L3nL4Addr as backends[0]
+	// that's associated with the service.
+	// Backend3 is a leaked backend with no associated service.
+	// Backend4 and Backend5 are duplicate leaked backends with no associated service.
+	backend2 := backends[0].DeepCopy()
+	backend2.ID = lb.BackendID(10)
+	backend3 := backends2[0].DeepCopy()
+	backend4 := backends6[0].DeepCopy()
+	backend4.ID = lb.BackendID(20)
+	backend5 := backends6[0].DeepCopy()
+	backend5.ID = lb.BackendID(30)
+	m.svc.lbmap.AddBackend(backend2, backend2.L3n4Addr.IsIPv6())
+	m.svc.lbmap.AddBackend(backend3, backend3.L3n4Addr.IsIPv6())
+	m.svc.lbmap.AddBackend(backend4, backend4.L3n4Addr.IsIPv6())
+	m.svc.lbmap.AddBackend(backend5, backend5.L3n4Addr.IsIPv6())
+	c.Assert(len(m.lbmap.BackendByID), Equals, len(backends)+4)
+	lbmap := m.svc.lbmap.(*mockmaps.LBMockMap)
+	m.svc = NewService(nil, nil, lbmap)
+
+	// Restore services from lbmap
+	err := m.svc.RestoreServices()
+	c.Assert(err, IsNil)
+	c.Assert(len(m.lbmap.ServiceByID[uint16(id1)].Backends), Equals, len(backends))
+	// Leaked backends should be deleted.
+	c.Assert(len(m.lbmap.BackendByID), Equals, len(backends))
 }

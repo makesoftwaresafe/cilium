@@ -37,6 +37,15 @@ const (
 
 	// CNPStatusCleanupBurstDefault is the default maximum burst for the CNP NodeStatus updates GC.
 	CNPStatusCleanupBurstDefault = 20
+
+	// PprofAddressOperator is the default value for pprof in the operator
+	PprofAddressOperator = "localhost"
+
+	// PprofPortOperator is the default value for pprof in the operator
+	PprofPortOperator = 6061
+
+	// DefaultProxyIdleTimeoutSeconds is the default value for the proxy idle timeout
+	DefaultProxyIdleTimeoutSeconds = 60
 )
 
 const (
@@ -46,10 +55,6 @@ const (
 	// BGPConfigPath is the file path to the BGP configuration. It is
 	// compatible with MetalLB's configuration.
 	BGPConfigPath = "bgp-config-path"
-
-	// SkipCRDCreation specifies whether the CustomResourceDefinition will be
-	// disabled for the operator
-	SkipCRDCreation = "skip-crd-creation"
 
 	// CNPNodeStatusGCInterval is the GC interval for nodes which have been
 	// removed from the cluster in CiliumNetworkPolicy and
@@ -85,22 +90,9 @@ const (
 	// NodesGCInterval is the duration for which the cilium nodes are GC.
 	NodesGCInterval = "nodes-gc-interval"
 
-	// OperatorAPIServeAddr IP:Port on which to serve api requests in
-	// operator (pass ":Port" to bind on all interfaces, "" is off)
-	OperatorAPIServeAddr = "operator-api-serve-addr"
-
 	// OperatorPrometheusServeAddr IP:Port on which to serve prometheus
 	// metrics (pass ":Port" to bind on all interfaces, "" is off).
 	OperatorPrometheusServeAddr = "operator-prometheus-serve-addr"
-
-	// PProf enabled pprof debugging endpoint
-	PProf = "operator-pprof"
-
-	// PProfAddress is the port that the pprof listens on
-	PProfAddress = "operator-pprof-address"
-
-	// PProfPort is the port that the pprof listens on
-	PProfPort = "operator-pprof-port"
 
 	// SyncK8sServices synchronizes k8s services into the kvstore
 	SyncK8sServices = "synchronize-k8s-services"
@@ -127,6 +119,9 @@ const (
 
 	// IPAMInstanceTagFilter are optional tags used to filter instances for ENI discovery ; only used with AWS IPAM mode for now
 	IPAMInstanceTags = "instance-tags-filter"
+
+	// IPAMMultiPoolMap are IP pool definitions used for the multi-pool IPAM mode.
+	IPAMMultiPoolMap = "multi-pool-map"
 
 	// ClusterPoolIPv4CIDR is the cluster's IPv4 CIDR to allocate
 	// individual PodCIDR ranges from when using the ClusterPool ipam mode.
@@ -270,6 +265,9 @@ const (
 	// GatewayAPISecretsNamespace is the namespace having tls secrets used by GatewayAPI and CEC.
 	GatewayAPISecretsNamespace = "gateway-api-secrets-namespace"
 
+	// ProxyIdleTimeoutSeconds is the idle timeout for proxy connections to upstream clusters
+	ProxyIdleTimeoutSeconds = "proxy-idle-timeout-seconds"
+
 	// EnableGatewayAPI enables support of Gateway API
 	// This must be enabled along with enable-envoy-config in cilium agent.
 	EnableGatewayAPI = "enable-gateway-api"
@@ -285,6 +283,10 @@ const (
 	// should be removed in Kubernetes nodes.
 	RemoveCiliumNodeTaints = "remove-cilium-node-taints"
 
+	// SetCiliumNodeTaints is whether or not to taint nodes that do not have
+	// a running Cilium instance.
+	SetCiliumNodeTaints = "set-cilium-node-taints"
+
 	// SetCiliumIsUpCondition sets the CiliumIsUp node condition in Kubernetes
 	// nodes.
 	SetCiliumIsUpCondition = "set-cilium-is-up-condition"
@@ -299,11 +301,6 @@ const (
 	// IngressDefaultLoadbalancerMode is the default loadbalancer mode for Ingress.
 	// Applicable values: dedicated, shared
 	IngressDefaultLoadbalancerMode = "ingress-default-lb-mode"
-
-	// EnableK8s operation of Kubernet-related services/controllers.
-	// Intended for operating cilium with CNI-compatible orchestrators
-	// other than Kubernetes. (default is true)
-	EnableK8s = "enable-k8s"
 
 	// PodRestartSelector specify the labels contained in the pod that needs to be restarted before the node can be de-stained
 	// default values: k8s-app=kube-dns
@@ -346,17 +343,7 @@ type OperatorConfig struct {
 	// will simply return.
 	EndpointGCInterval time.Duration
 
-	OperatorAPIServeAddr        string
 	OperatorPrometheusServeAddr string
-
-	// PProf enables pprof debugging endpoint
-	PProf bool
-
-	// PProfAddress is the address that the pprof listens on
-	PProfAddress string
-
-	// PProfPort is the port that the pprof listens on
-	PProfPort int
 
 	// SyncK8sServices synchronizes k8s services into the kvstore
 	SyncK8sServices bool
@@ -385,10 +372,6 @@ type OperatorConfig struct {
 	// BGPConfigPath is the file path to the BGP configuration. It is
 	// compatible with MetalLB's configuration.
 	BGPConfigPath string
-
-	// SkipCRDCreation disables creation of the CustomResourceDefinition
-	// for the operator
-	SkipCRDCreation bool
 
 	// IPAM options
 
@@ -425,6 +408,9 @@ type OperatorConfig struct {
 	// per node.
 	NodeCIDRMaskSizeIPv6 int
 
+	// IPAMMultiPoolMap are IP pool definitions used for the multi-pool IPAM mode.
+	IPAMMultiPoolMap map[string]string
+
 	// AWS options
 
 	// ENITags are the tags that will be added to every ENI created by the AWS ENI IPAM
@@ -439,7 +425,7 @@ type OperatorConfig struct {
 	// ENIGarbageCollectionInterval defines the interval of ENI GC
 	ENIGarbageCollectionInterval time.Duration
 
-	// ParallelAllocWorkers specifies the number of parallel workers to be used in ENI mode.
+	// ParallelAllocWorkers specifies the number of parallel workers to be used for accessing cloud provider APIs .
 	ParallelAllocWorkers int64
 
 	// AWSInstanceLimitMapping allows overwriting AWS instance limits defined in
@@ -538,6 +524,9 @@ type OperatorConfig struct {
 	// GatewayAPISecretsNamespace is the namespace having tls secrets used by CEC for Gateway API.
 	GatewayAPISecretsNamespace string
 
+	// ProxyIdleTimeoutSeconds is the idle timeout for the proxy to upstream cluster
+	ProxyIdleTimeoutSeconds int
+
 	// CiliumK8sNamespace is the namespace where Cilium pods are running.
 	CiliumK8sNamespace string
 
@@ -548,6 +537,10 @@ type OperatorConfig struct {
 	// RemoveCiliumNodeTaints is the flag to define if the Cilium node taint
 	// should be removed in Kubernetes nodes.
 	RemoveCiliumNodeTaints bool
+
+	// SetCiliumNodeTaints is whether or not to set taints on nodes that do not
+	// have a running Cilium pod.
+	SetCiliumNodeTaints bool
 
 	// SetCiliumIsUpCondition sets the CiliumIsUp node condition in Kubernetes
 	// nodes.
@@ -564,11 +557,6 @@ type OperatorConfig struct {
 	// Applicable values: dedicated, shared
 	IngressDefaultLoadbalancerMode string
 
-	// Enables/Disables operation of kubernet-related services/controllers.
-	// Intended for operating cilium with CNI-compatible orquestrators
-	// othern than Kubernetes. (default is true)
-	EnableK8s bool
-
 	// PodRestartSelector specify the labels contained in the pod that needs to be restarted before the node can be de-stained
 	PodRestartSelector string
 }
@@ -583,11 +571,7 @@ func (c *OperatorConfig) Populate(vp *viper.Viper) {
 	c.CNPStatusCleanupBurst = vp.GetInt(CNPStatusCleanupBurst)
 	c.EnableMetrics = vp.GetBool(EnableMetrics)
 	c.EndpointGCInterval = vp.GetDuration(EndpointGCInterval)
-	c.OperatorAPIServeAddr = vp.GetString(OperatorAPIServeAddr)
 	c.OperatorPrometheusServeAddr = vp.GetString(OperatorPrometheusServeAddr)
-	c.PProf = vp.GetBool(PProf)
-	c.PProfAddress = vp.GetString(PProfAddress)
-	c.PProfPort = vp.GetInt(PProfPort)
 	c.SyncK8sServices = vp.GetBool(SyncK8sServices)
 	c.SyncK8sNodes = vp.GetBool(SyncK8sNodes)
 	c.UnmanagedPodWatcherInterval = vp.GetInt(UnmanagedPodWatcherInterval)
@@ -600,7 +584,6 @@ func (c *OperatorConfig) Populate(vp *viper.Viper) {
 	c.LeaderElectionRetryPeriod = vp.GetDuration(LeaderElectionRetryPeriod)
 	c.BGPAnnounceLBIP = vp.GetBool(BGPAnnounceLBIP)
 	c.BGPConfigPath = vp.GetString(BGPConfigPath)
-	c.SkipCRDCreation = vp.GetBool(SkipCRDCreation)
 	c.LoadBalancerL7 = vp.GetString(LoadBalancerL7)
 	c.LoadBalancerL7Ports = vp.GetStringSlice(LoadBalancerL7Ports)
 	c.LoadBalancerL7Algorithm = vp.GetString(LoadBalancerL7Algorithm)
@@ -609,15 +592,19 @@ func (c *OperatorConfig) Populate(vp *viper.Viper) {
 	c.EnforceIngressHTTPS = vp.GetBool(EnforceIngressHttps)
 	c.IngressSecretsNamespace = vp.GetString(IngressSecretsNamespace)
 	c.GatewayAPISecretsNamespace = vp.GetString(GatewayAPISecretsNamespace)
+	c.ProxyIdleTimeoutSeconds = vp.GetInt(ProxyIdleTimeoutSeconds)
+	if c.ProxyIdleTimeoutSeconds == 0 {
+		c.ProxyIdleTimeoutSeconds = DefaultProxyIdleTimeoutSeconds
+	}
 	c.EnableIngressSecretsSync = vp.GetBool(EnableIngressSecretsSync)
 	c.EnableGatewayAPISecretsSync = vp.GetBool(EnableGatewayAPISecretsSync)
 	c.CiliumPodLabels = vp.GetString(CiliumPodLabels)
 	c.RemoveCiliumNodeTaints = vp.GetBool(RemoveCiliumNodeTaints)
+	c.SetCiliumNodeTaints = vp.GetBool(SetCiliumNodeTaints)
 	c.SetCiliumIsUpCondition = vp.GetBool(SetCiliumIsUpCondition)
 	c.IngressLBAnnotationPrefixes = vp.GetStringSlice(IngressLBAnnotationPrefixes)
 	c.IngressSharedLBServiceName = vp.GetString(IngressSharedLBServiceName)
 	c.IngressDefaultLoadbalancerMode = vp.GetString(IngressDefaultLoadbalancerMode)
-	c.EnableK8s = vp.GetBool(EnableK8s)
 	c.PodRestartSelector = vp.GetString(PodRestartSelector)
 
 	c.CiliumK8sNamespace = vp.GetString(CiliumK8sNamespace)
@@ -635,6 +622,12 @@ func (c *OperatorConfig) Populate(vp *viper.Viper) {
 		log.Infof("Auto-set %q to `true` because BGP support requires synchronizing services.",
 			SyncK8sServices)
 	}
+
+	// IPAM options
+
+	c.IPAMAPIQPSLimit = vp.GetFloat64(IPAMAPIQPSLimit)
+	c.IPAMAPIBurst = vp.GetInt(IPAMAPIBurst)
+	c.ParallelAllocWorkers = vp.GetInt64(ParallelAllocWorkers)
 
 	// AWS options
 
@@ -697,6 +690,12 @@ func (c *OperatorConfig) Populate(vp *viper.Viper) {
 	} else {
 		c.ENIGarbageCollectionTags = m
 	}
+
+	if m, err := command.GetStringMapStringE(vp, IPAMMultiPoolMap); err != nil {
+		log.Fatalf("unable to parse %s: %s", IPAMMultiPoolMap, err)
+	} else {
+		c.IPAMMultiPoolMap = m
+	}
 }
 
 // Config represents the operator configuration.
@@ -704,6 +703,7 @@ var Config = &OperatorConfig{
 	IPAMSubnetsIDs:           make([]string, 0),
 	IPAMSubnetsTags:          make(map[string]string),
 	IPAMInstanceTags:         make(map[string]string),
+	IPAMMultiPoolMap:         make(map[string]string),
 	AWSInstanceLimitMapping:  make(map[string]string),
 	ENITags:                  make(map[string]string),
 	ENIGarbageCollectionTags: make(map[string]string),

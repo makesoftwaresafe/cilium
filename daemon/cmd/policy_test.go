@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright Authors of Cilium
 
-//go:build integration_tests
-
 package cmd
 
 import (
@@ -14,11 +12,11 @@ import (
 	"sync"
 	"time"
 
+	. "github.com/cilium/checkmate"
 	cilium "github.com/cilium/proxy/go/cilium/api"
 	envoy_config_core "github.com/cilium/proxy/go/envoy/config/core/v3"
 	envoy_config_route "github.com/cilium/proxy/go/envoy/config/route/v3"
 	envoy_type_matcher "github.com/cilium/proxy/go/envoy/type/matcher/v3"
-	. "gopkg.in/check.v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8sTypes "k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/cache"
@@ -58,6 +56,8 @@ var (
 
 	testQAEndpointID   = uint16(1)
 	testProdEndpointID = uint16(2)
+
+	policyAddOptions = &policy.AddOptions{}
 
 	regenerationMetadata = &regeneration.ExternalRegenerationMetadata{
 		Reason:            "test",
@@ -103,7 +103,6 @@ var (
 			},
 		},
 	}
-	googleRe2 = &envoy_type_matcher.RegexMatcher_GoogleRe2{GoogleRe2: &envoy_type_matcher.RegexMatcher_GoogleRE2{}}
 
 	PNPAllowGETbar = cilium.PortNetworkPolicyRule_HttpRules{
 		HttpRules: &cilium.HttpNetworkPolicyRules{
@@ -112,19 +111,27 @@ var (
 					Headers: []*envoy_config_route.HeaderMatcher{
 						{
 							Name: ":method",
-							HeaderMatchSpecifier: &envoy_config_route.HeaderMatcher_SafeRegexMatch{
-								SafeRegexMatch: &envoy_type_matcher.RegexMatcher{
-									EngineType: googleRe2,
-									Regex:      "GET",
-								}},
+							HeaderMatchSpecifier: &envoy_config_route.HeaderMatcher_StringMatch{
+								StringMatch: &envoy_type_matcher.StringMatcher{
+									MatchPattern: &envoy_type_matcher.StringMatcher_SafeRegex{
+										SafeRegex: &envoy_type_matcher.RegexMatcher{
+											Regex: "GET",
+										},
+									},
+								},
+							},
 						},
 						{
 							Name: ":path",
-							HeaderMatchSpecifier: &envoy_config_route.HeaderMatcher_SafeRegexMatch{
-								SafeRegexMatch: &envoy_type_matcher.RegexMatcher{
-									EngineType: googleRe2,
-									Regex:      "/bar",
-								}},
+							HeaderMatchSpecifier: &envoy_config_route.HeaderMatcher_StringMatch{
+								StringMatch: &envoy_type_matcher.StringMatcher{
+									MatchPattern: &envoy_type_matcher.StringMatcher_SafeRegex{
+										SafeRegex: &envoy_type_matcher.RegexMatcher{
+											Regex: "/bar",
+										},
+									},
+								},
+							},
 						},
 					},
 				},
@@ -139,11 +146,15 @@ var (
 					Headers: []*envoy_config_route.HeaderMatcher{
 						{
 							Name: ":method",
-							HeaderMatchSpecifier: &envoy_config_route.HeaderMatcher_SafeRegexMatch{
-								SafeRegexMatch: &envoy_type_matcher.RegexMatcher{
-									EngineType: googleRe2,
-									Regex:      "GET",
-								}},
+							HeaderMatchSpecifier: &envoy_config_route.HeaderMatcher_StringMatch{
+								StringMatch: &envoy_type_matcher.StringMatcher{
+									MatchPattern: &envoy_type_matcher.StringMatcher_SafeRegex{
+										SafeRegex: &envoy_type_matcher.RegexMatcher{
+											Regex: "GET",
+										},
+									},
+								},
+							},
 						},
 					},
 					HeaderMatches: []*cilium.HeaderMatch{
@@ -285,7 +296,7 @@ func (ds *DaemonSuite) TestUpdateConsumerMap(c *C) {
 
 	ds.d.l7Proxy.RemoveAllNetworkPolicies()
 
-	_, err3 := ds.d.PolicyAdd(rules, nil)
+	_, err3 := ds.d.PolicyAdd(rules, policyAddOptions)
 	c.Assert(err3, Equals, nil)
 
 	// Prepare the identities necessary for testing
@@ -459,7 +470,7 @@ func (ds *DaemonSuite) TestL4_L7_Shadowing(c *C) {
 
 	ds.d.l7Proxy.RemoveAllNetworkPolicies()
 
-	_, err = ds.d.PolicyAdd(rules, nil)
+	_, err = ds.d.PolicyAdd(rules, policyAddOptions)
 	c.Assert(err, Equals, nil)
 
 	// Prepare endpoints
@@ -543,7 +554,7 @@ func (ds *DaemonSuite) TestL4_L7_ShadowingShortCircuit(c *C) {
 
 	ds.d.l7Proxy.RemoveAllNetworkPolicies()
 
-	_, err = ds.d.PolicyAdd(rules, nil)
+	_, err = ds.d.PolicyAdd(rules, policyAddOptions)
 	c.Assert(err, Equals, nil)
 
 	// Prepare endpoints
@@ -630,7 +641,7 @@ func (ds *DaemonSuite) TestL3_dependent_L7(c *C) {
 
 	ds.d.l7Proxy.RemoveAllNetworkPolicies()
 
-	_, err = ds.d.PolicyAdd(rules, nil)
+	_, err = ds.d.PolicyAdd(rules, policyAddOptions)
 	c.Assert(err, Equals, nil)
 
 	// Prepare endpoints
@@ -703,7 +714,7 @@ func (ds *DaemonSuite) TestReplacePolicy(c *C) {
 		},
 	}
 
-	_, err := ds.d.PolicyAdd(rules, nil)
+	_, err := ds.d.PolicyAdd(rules, policyAddOptions)
 	c.Assert(err, IsNil)
 	ds.d.policy.Mutex.RLock()
 	c.Assert(len(ds.d.policy.SearchRLocked(lbls)), Equals, 2)
@@ -805,7 +816,7 @@ func (ds *DaemonSuite) TestRemovePolicy(c *C) {
 
 	ds.d.l7Proxy.RemoveAllNetworkPolicies()
 
-	_, err3 := ds.d.PolicyAdd(rules, nil)
+	_, err3 := ds.d.PolicyAdd(rules, policyAddOptions)
 	c.Assert(err3, Equals, nil)
 
 	cleanup, err2 := prepareEndpointDirs()
@@ -890,7 +901,7 @@ func (ds *DaemonSuite) TestIncrementalPolicy(c *C) {
 
 	ds.d.l7Proxy.RemoveAllNetworkPolicies()
 
-	_, err3 := ds.d.PolicyAdd(rules, nil)
+	_, err3 := ds.d.PolicyAdd(rules, policyAddOptions)
 	c.Assert(err3, Equals, nil)
 
 	cleanup, err2 := prepareEndpointDirs()
@@ -1295,7 +1306,7 @@ func (ds *DaemonSuite) Test_addCiliumNetworkPolicyV2(c *C) {
 		rules, policyImportErr := args.cnp.Parse()
 		c.Assert(policyImportErr, checker.DeepEquals, want.err)
 
-		policyImportErr = k8s.PreprocessRules(rules, &ds.d.k8sWatcher.K8sSvcCache)
+		policyImportErr = k8s.PreprocessRules(rules, ds.d.k8sWatcher.K8sSvcCache)
 		c.Assert(policyImportErr, IsNil)
 
 		// Only add policies if we have successfully parsed them. Otherwise, if

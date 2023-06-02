@@ -9,6 +9,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/sirupsen/logrus"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -54,7 +55,7 @@ type Controller struct {
 
 // NewController returns a new gateway controller, which is implemented
 // using the controller-runtime library.
-func NewController(enableSecretSync bool, secretsNamespace string) (*Controller, error) {
+func NewController(enableSecretSync bool, secretsNamespace string, idleTimeoutSeconds int) (*Controller, error) {
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme: scheme,
 		// Disable controller metrics server in favour of cilium's metrics server.
@@ -77,11 +78,12 @@ func NewController(enableSecretSync bool, secretsNamespace string) (*Controller,
 	}
 
 	gwReconciler := &gatewayReconciler{
-		Client:           mgr.GetClient(),
-		Scheme:           mgr.GetScheme(),
-		SecretsNamespace: secretsNamespace,
-		Model:            m,
-		controllerName:   controllerName,
+		Client:             mgr.GetClient(),
+		Scheme:             mgr.GetScheme(),
+		SecretsNamespace:   secretsNamespace,
+		Model:              m,
+		controllerName:     controllerName,
+		IdleTimeoutSeconds: idleTimeoutSeconds,
 	}
 	if err = gwReconciler.SetupWithManager(mgr); err != nil {
 		return nil, err
@@ -93,6 +95,15 @@ func NewController(enableSecretSync bool, secretsNamespace string) (*Controller,
 		Model:  m,
 	}
 	if err = hrReconciler.SetupWithManager(mgr); err != nil {
+		return nil, err
+	}
+
+	tlsReconciler := &tlsRouteReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+		Model:  m,
+	}
+	if err = tlsReconciler.SetupWithManager(mgr); err != nil {
 		return nil, err
 	}
 
@@ -188,6 +199,59 @@ func getGatewaysForSecret(ctx context.Context, c client.Client, obj client.Objec
 	return gateways
 }
 
+func getGatewaysForNamespace(ctx context.Context, c client.Client, ns client.Object) []types.NamespacedName {
+	scopedLog := log.WithFields(logrus.Fields{
+		logfields.Controller:   gateway,
+		logfields.K8sNamespace: ns.GetName(),
+	})
+
+	gwList := &gatewayv1beta1.GatewayList{}
+	if err := c.List(ctx, gwList); err != nil {
+		scopedLog.WithError(err).Warn("Unable to list Gateways")
+		return nil
+	}
+
+	var gateways []types.NamespacedName
+	for _, gw := range gwList.Items {
+		for _, l := range gw.Spec.Listeners {
+			if l.AllowedRoutes == nil || l.AllowedRoutes.Namespaces == nil {
+				continue
+			}
+
+			switch *l.AllowedRoutes.Namespaces.From {
+			case gatewayv1beta1.NamespacesFromAll:
+				gateways = append(gateways, client.ObjectKey{
+					Namespace: gw.GetNamespace(),
+					Name:      gw.GetName(),
+				})
+			case gatewayv1beta1.NamespacesFromSame:
+				if ns.GetName() == gw.GetNamespace() {
+					gateways = append(gateways, client.ObjectKey{
+						Namespace: gw.GetNamespace(),
+						Name:      gw.GetName(),
+					})
+				}
+			case gatewayv1beta1.NamespacesFromSelector:
+				nsList := &corev1.NamespaceList{}
+				err := c.List(ctx, nsList, client.MatchingLabels(l.AllowedRoutes.Namespaces.Selector.MatchLabels))
+				if err != nil {
+					scopedLog.WithError(err).Warn("Unable to list Namespaces")
+					return nil
+				}
+				for _, item := range nsList.Items {
+					if item.GetName() == ns.GetName() {
+						gateways = append(gateways, client.ObjectKey{
+							Namespace: gw.GetNamespace(),
+							Name:      gw.GetName(),
+						})
+					}
+				}
+			}
+		}
+	}
+	return gateways
+}
+
 // onlyStatusChanged returns true if and only if there is status change for underlying objects.
 // Supported objects are GatewayClass, Gateway, and HTTPRoute.
 func onlyStatusChanged() predicate.Predicate {
@@ -212,6 +276,13 @@ func onlyStatusChanged() predicate.Predicate {
 			case *gatewayv1beta1.HTTPRoute:
 				o, _ := e.ObjectOld.(*gatewayv1beta1.HTTPRoute)
 				n, ok := e.ObjectNew.(*gatewayv1beta1.HTTPRoute)
+				if !ok {
+					return false
+				}
+				return !cmp.Equal(o.Status, n.Status, option)
+			case *gatewayv1alpha2.TLSRoute:
+				o, _ := e.ObjectOld.(*gatewayv1alpha2.TLSRoute)
+				n, ok := e.ObjectNew.(*gatewayv1alpha2.TLSRoute)
 				if !ok {
 					return false
 				}

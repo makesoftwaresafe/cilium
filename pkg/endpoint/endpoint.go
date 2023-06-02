@@ -15,8 +15,8 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
-	"unsafe"
 
 	"github.com/sirupsen/logrus"
 
@@ -166,8 +166,14 @@ type Endpoint struct {
 	// IPv6 is the IPv6 address of the endpoint
 	IPv6 netip.Addr
 
+	// IPv6IPAMPool is the IPAM address pool from which the IPv6 address has been allocated from
+	IPv6IPAMPool string
+
 	// IPv4 is the IPv4 address of the endpoint
 	IPv4 netip.Addr
+
+	// IPv4IPAMPool is the IPAM address pool from which the IPv4 address has been allocated from
+	IPv4IPAMPool string
 
 	// nodeMAC is the MAC of the node (agent). The MAC is different for every endpoint.
 	nodeMAC mac.MAC
@@ -280,13 +286,13 @@ type Endpoint struct {
 	// This must only be accessed with atomic.LoadPointer/StorePointer.
 	// 'mutex' must be Lock()ed to synchronize stores. No lock needs to be held
 	// when loading this pointer.
-	logger unsafe.Pointer
+	logger atomic.Pointer[logrus.Entry]
 
 	// policyLogger is a logrus object with fields set to report an endpoints information.
 	// This must only be accessed with atomic LoadPointer/StorePointer.
 	// 'mutex' must be Lock()ed to synchronize stores. No lock needs to be held
 	// when loading this pointer.
-	policyLogger unsafe.Pointer
+	policyLogger atomic.Pointer[logrus.Entry]
 
 	// controllers is the list of async controllers syncing the endpoint to
 	// other resources
@@ -2101,11 +2107,22 @@ func (e *Endpoint) syncEndpointHeaderFile(reasons []string) {
 	e.buildMutex.Lock()
 	defer e.buildMutex.Unlock()
 
+	// The following GetDNSRules call will acquire a read-lock on the IPCache.
+	// Because IPCache itself will potentially acquire endpoint locks in its
+	// critical section, we must _not_ hold endpoint.mutex while calling
+	// GetDNSRules, to avoid a deadlock between IPCache and the endpoint. It is
+	// okay to hold endpoint.buildMutex, however.
+	rules := e.owner.GetDNSRules(e.ID)
+
 	if err := e.lockAlive(); err != nil {
 		// endpoint was removed in the meanwhile, return
 		return
 	}
 	defer e.unlock()
+
+	// Update DNSRules if any. This is needed because DNSRules also encode allowed destination IPs
+	// and those can change anytime we have identity updates in the cluster.
+	e.OnDNSPolicyUpdateLocked(rules)
 
 	if err := e.writeHeaderfile(e.StateDirectoryPath()); err != nil {
 		e.getLogger().WithFields(logrus.Fields{
@@ -2128,7 +2145,6 @@ func (e *Endpoint) SyncEndpointHeaderFile() {
 // * removal from the endpointmanager, resulting in new events not taking effect
 // on this endpoint
 // * cleanup of datapath state (BPF maps, proxy configuration, directories)
-// * releasing IP addresses allocated for the endpoint
 // * releasing of the reference to its allocated security identity
 func (e *Endpoint) Delete(conf DeleteConfig) []error {
 	errs := []error{}

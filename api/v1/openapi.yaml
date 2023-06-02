@@ -85,6 +85,8 @@ paths:
           description: Bad configuration parameters
           schema:
             "$ref": "#/definitions/Error"
+        '403':
+          description: Forbidden
         '500':
           description: Recompilation failed
           x-go-name: Failure
@@ -130,6 +132,8 @@ paths:
           x-go-name: Invalid
           schema:
             "$ref": "#/definitions/Error"
+        '403':
+          description: Forbidden
         '409':
           description: Endpoint already exists
           x-go-name: Exists
@@ -158,6 +162,8 @@ paths:
           x-go-name: Invalid
           schema:
             "$ref": "#/definitions/Error"
+        '403':
+          description: Forbidden
         '404':
           description: Endpoint does not exist
         '500':
@@ -198,6 +204,8 @@ paths:
           x-go-name: Invalid
           schema:
             "$ref": "#/definitions/Error"
+        '403':
+          description: Forbidden
         '404':
           description: Endpoint not found
         '429':
@@ -260,6 +268,8 @@ paths:
         '400':
           description: Invalid configuration request
           x-go-name: Invalid
+        '403':
+          description: Forbidden
         '404':
           description: Endpoint not found
         '500':
@@ -302,6 +312,8 @@ paths:
       responses:
         '200':
           description: Success
+        '403':
+          description: Forbidden
         '404':
           description: Endpoint not found
         '500':
@@ -426,12 +438,15 @@ paths:
       parameters:
       - "$ref": "#/parameters/ipam-family"
       - "$ref": "#/parameters/ipam-owner"
+      - "$ref": "#/parameters/ipam-pool"
       - "$ref": "#/parameters/ipam-expiration"
       responses:
         '201':
           description: Success
           schema:
             "$ref": "#/definitions/IPAMResponse"
+        '403':
+          description: Forbidden
         '502':
           description: Allocation failure
           x-go-name: Failure
@@ -445,12 +460,15 @@ paths:
       parameters:
       - "$ref": "#/parameters/ipam-ip"
       - "$ref": "#/parameters/ipam-owner"
+      - "$ref": "#/parameters/ipam-pool"
       responses:
         '200':
           description: Success
         '400':
           description: Invalid IP address
           x-go-name: Invalid
+        '403':
+          description: Forbidden
         '409':
           description: IP already allocated
           x-go-name: Exists
@@ -467,13 +485,16 @@ paths:
       tags:
       - ipam
       parameters:
-      - "$ref": "#/parameters/ipam-release-arg"
+      - "$ref": "#/parameters/ipam-ip"
+      - "$ref": "#/parameters/ipam-pool"
       responses:
         '200':
           description: Success
         '400':
           description: Invalid IP address
           x-go-name: Invalid
+        '403':
+          description: Forbidden
         '404':
           description: IP address not found
         '500':
@@ -519,6 +540,8 @@ paths:
           x-go-name: InvalidPolicy
           schema:
             "$ref": "#/definitions/Error"
+        '403':
+          description: Forbidden
         '460':
           description: Invalid path
           x-go-name: InvalidPath
@@ -549,6 +572,8 @@ paths:
           x-go-name: Invalid
           schema:
             "$ref": "#/definitions/Error"
+        '403':
+          description: Forbidden
         '404':
           description: Policy not found
         '500':
@@ -616,6 +641,8 @@ paths:
           description: Updated
         '201':
           description: Created
+        '403':
+          description: Forbidden
         '460':
           description: Invalid frontend in service configuration
           x-go-name: InvalidFrontend
@@ -645,6 +672,8 @@ paths:
       responses:
         '200':
           description: Success
+        '403':
+          description: Forbidden
         '404':
           description: Service not found
         '500':
@@ -702,6 +731,8 @@ paths:
           description: Updated
         '201':
           description: Created
+        '403':
+          description: Forbidden
         '500':
           description: Error while creating recorder
           x-go-name: Failure
@@ -716,6 +747,8 @@ paths:
       responses:
         '200':
           description: Success
+        '403':
+          description: Forbidden
         '404':
           description: Recorder not found
         '500':
@@ -749,6 +782,8 @@ paths:
           description: Updated
           schema:
             "$ref": "#/definitions/Prefilter"
+        '403':
+          description: Forbidden
         '461':
           description: Invalid CIDR prefix
           x-go-name: InvalidCIDR
@@ -770,6 +805,8 @@ paths:
           description: Deleted
           schema:
             "$ref": "#/definitions/Prefilter"
+        '403':
+          description: Forbidden
         '461':
           description: Invalid CIDR prefix
           x-go-name: InvalidCIDR
@@ -847,7 +884,7 @@ paths:
           description: Success
           schema:
             type: string
-            format: binary 
+            format: binary
         '404':
           description: Map not found
   "/metrics/":
@@ -904,6 +941,8 @@ paths:
       responses:
         '200':
           description: Success
+        '403':
+          description: Forbidden
         '400':
           description: Invalid request (error parsing parameters)
           schema:
@@ -991,6 +1030,22 @@ paths:
             type: array
             items:
               "$ref": "#/definitions/NodeID"
+  "/bgp/peers":
+    get:
+      summary: Lists operational state of BGP peers
+      description: |
+        Retrieves current operational state of BGP peers created by 
+        Cilium BGP virtual router. This includes session state, uptime,
+        information per address family, etc.
+      tags:
+        - bgp
+      responses:
+        '200':
+          description: Success
+          schema:
+            type: array
+            items:
+              "$ref": "#/definitions/BgpPeer"
 parameters:
   endpoint-id:
     name: id
@@ -1096,12 +1151,6 @@ parameters:
     in: path
     required: true
     type: string
-  ipam-release-arg:
-    name: ip
-    description: IP address or owner name
-    in: path
-    required: true
-    type: string
   ipam-family:
     name: family
     in: query
@@ -1111,6 +1160,10 @@ parameters:
     - ipv6
   ipam-owner:
     name: owner
+    in: query
+    type: string
+  ipam-pool:
+    name: pool
     in: query
     type: string
   ipam-expiration:
@@ -1147,7 +1200,6 @@ parameters:
     required: false
     in: query
     type: string
-
 
 definitions:
   Endpoint:
@@ -1462,6 +1514,15 @@ definitions:
           type: array
           items:
             type: string
+      rules-by-selector:
+        description: The policy rule labels identifying the policy rules this rule derives from, mapped by selector
+        type: object
+        additionalProperties:
+          type: array
+          items:
+            type: array
+            items:
+              type: string
   L4Policy:
     description: |-
       L4 endpoint policy
@@ -1655,11 +1716,17 @@ definitions:
       ipv4-expiration-uuid:
         description: UUID of IPv4 expiration timer
         type: string
+      ipv4-pool-name:
+        description: IPAM pool from which this IPv4 address was allocated
+        type: string
       ipv6:
         description: IPv6 address
         type: string
       ipv6-expiration-uuid:
         description: UUID of IPv6 expiration timer
+        type: string
+      ipv6-pool-name:
+        description: IPAM pool from which this IPv6 address was allocated
         type: string
   Address:
     description: IP address
@@ -2158,6 +2225,9 @@ definitions:
             properties:
               enabled:
                 type: boolean
+          bpfSocketLBHostnsOnly:
+            description: flag bpf-lb-sock-hostns-only
+            type: boolean
   AllocationMap:
     description: |
       Map of allocated IPs
@@ -2742,6 +2812,9 @@ definitions:
           namespace:
             description: Service namespace  (e.g. Kubernetes namespace)
             type: string
+          cluster:
+            description: Service cluster
+            type: string
       updateServices:
         description: |
           Update all services selecting the backends with their given states
@@ -2871,6 +2944,12 @@ definitions:
         type: array
         items:
           "$ref": "#/definitions/ProxyRedirect"
+      envoy-deployment-mode:
+        description: Deployment mode of Envoy L7 proxy
+        type: string
+        enum:
+          - embedded
+          - external
   IdentityRange:
     description: |-
       Status of identity range of the cluster
@@ -3377,6 +3456,9 @@ definitions:
 
       +k8s:deepcopy-gen=true
     properties:
+      node-encryption:
+        description: Node Encryption status
+        type: string
       interfaces:
         description: Wireguard interfaces managed by this Cilium instance
         type: array
@@ -3432,3 +3514,75 @@ definitions:
         type: array
         items:
           type: string
+  BgpPeer:
+    description: |-
+      State of a BGP Peer
+      
+      +k8s:deepcopy-gen=true
+    properties:
+      local-asn:
+        description: Local AS Number
+        type: integer
+      peer-asn:
+        description: Peer AS Number
+        type: integer
+      peer-address:
+        description: IP Address of peer
+        type: string
+      session-state:
+        description: |
+          BGP peer operational state as described here
+          https://www.rfc-editor.org/rfc/rfc4271#section-8.2.2
+        type: string
+      uptime-nanoseconds:
+        description: BGP peer connection uptime in nano seconds.
+        type: integer
+      families:
+        description: BGP peer address family state
+        type: array
+        items:
+          "$ref": "#/definitions/BgpPeerFamilies"
+      connect-retry-time-seconds:
+        description: Initial value for the BGP ConnectRetryTimer (RFC 4271, Section 8) in seconds
+        type: integer
+      configured-hold-time-seconds:
+        description: |
+          Configured initial value for the BGP HoldTimer (RFC 4271, Section 4.2) in seconds.
+          The configured value will be used for negotiation with the peer during the BGP session establishment.
+        type: integer
+      applied-hold-time-seconds:
+        description: |
+          Applied initial value for the BGP HoldTimer (RFC 4271, Section 4.2) in seconds.
+          The applied value holds the value that is in effect on the current BGP session.
+        type: integer
+      configured-keep-alive-time-seconds:
+        description: |
+          Configured initial value for the BGP KeepaliveTimer (RFC 4271, Section 8) in seconds.
+          The applied value may be different than the configured value, as it depends on the negotiated hold time interval.
+        type: integer
+      applied-keep-alive-time-seconds:
+        description: |
+          Applied initial value for the BGP KeepaliveTimer (RFC 4271, Section 8) in seconds.
+          The applied value holds the value that is in effect on the current BGP session.
+        type: integer
+  BgpPeerFamilies:
+    description: |-
+      BGP AFI SAFI state of the peer
+      
+      +k8s:deepcopy-gen=true
+    properties:
+      afi:
+        description: BGP address family indicator
+        type: string
+      safi:
+        description: BGP subsequent address family indicator
+        type: string
+      received:
+        description: Number of routes received from the peer of this address family
+        type: integer
+      accepted:
+        description: Number of routes accepted from the peer of this address family
+        type: integer
+      advertised:
+        description: Number of routes advertised of this address family to the peer
+        type: integer

@@ -4,8 +4,8 @@ name: CODEOWNERS checks
 on:
   pull_request:
     branches:
-      - master
-      - ft/master/**
+      - main
+      - ft/main/**
 
 permissions: read-all
 
@@ -41,7 +41,7 @@ jobs:
     name: Check CODEOWNERS consistency
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@ac593985615ec2ede58e132d2e21d2b1cbd6127c # v3.3.0
+      - uses: actions/checkout@8e5e7e5ab8b370d6c329ec480221332ada57f0ab # v3.5.2
         with:
           persist-credentials: false
           # Hard-code the path instead of using ${{ github.repository }}

@@ -5,6 +5,7 @@ package metrics
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
@@ -39,6 +40,17 @@ var (
 	enabledMetrics     *api.Handlers
 	registry           = prometheus.NewPedanticRegistry()
 	podDeletionHandler *PodDeletionHandler
+)
+
+// Additional metrics - they're not counting flows, so are not served via
+// Hubble metrics API, but belong to the same Prometheus namespace.
+var (
+	labelSource = "source"
+	LostEvents  = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: api.DefaultPrometheusNamespace,
+		Name:      "lost_events_total",
+		Help:      "Number of lost events",
+	}, []string{labelSource})
 )
 
 // ProcessFlow processes a flow and updates metrics
@@ -101,6 +113,7 @@ func initMetrics(address string, enabled api.Map, grpcMetrics *grpc_prometheus.S
 	enabledMetrics = e
 
 	registry.MustRegister(grpcMetrics)
+	registry.MustRegister(LostEvents)
 
 	errChan := make(chan error, 1)
 
@@ -119,7 +132,7 @@ func EnableMetrics(log logrus.FieldLogger, metricsServer string, m []string, grp
 	}
 	go func() {
 		err := <-errChan
-		if err != nil {
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.WithError(err).Error("Unable to initialize metrics server")
 		}
 	}()

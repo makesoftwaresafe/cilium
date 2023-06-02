@@ -16,6 +16,7 @@ import (
 	"github.com/cilium/cilium/pkg/cidr"
 	cmtypes "github.com/cilium/cilium/pkg/clustermesh/types"
 	datapathTypes "github.com/cilium/cilium/pkg/datapath/types"
+	"github.com/cilium/cilium/pkg/ip"
 	"github.com/cilium/cilium/pkg/loadbalancer"
 	"github.com/cilium/cilium/pkg/logging"
 	"github.com/cilium/cilium/pkg/logging/logfields"
@@ -377,7 +378,7 @@ func updateRevNatLocked(key RevNatKey, value RevNatValue) error {
 	if key.GetKey() == 0 {
 		return fmt.Errorf("invalid RevNat ID (0)")
 	}
-	if _, err := key.Map().OpenOrCreate(); err != nil {
+	if err := key.Map().OpenOrCreate(); err != nil {
 		return err
 	}
 
@@ -398,6 +399,14 @@ func (*LBBPFMap) UpdateSourceRanges(revNATID uint16, prevSourceRanges []*cidr.CI
 
 	srcRangeMap := map[string]*cidr.CIDR{}
 	for _, cidr := range sourceRanges {
+		// k8s api server does not catch the IP family mismatch, so we need to catch it here
+		if ip.IsIPv6(cidr.IP) == !ipv6 {
+			log.WithFields(logrus.Fields{
+				logfields.ServiceID: revNATID,
+				logfields.CIDR:      cidr,
+			}).Warn("Source range's IP family does not match with the LB's. Ignoring the source range CIDR")
+			continue
+		}
 		srcRangeMap[cidr.String()] = cidr
 	}
 
@@ -617,7 +626,7 @@ func getBackend(backend *loadbalancer.Backend, ipv6 bool) (Backend, error) {
 }
 
 func updateBackend(backend Backend) error {
-	if _, err := backend.Map().OpenOrCreate(); err != nil {
+	if err := backend.Map().OpenOrCreate(); err != nil {
 		return err
 	}
 
@@ -633,7 +642,7 @@ func updateServiceEndpoint(key ServiceKey, value ServiceValue) error {
 	if key.GetBackendSlot() != 0 && value.RevNatKey().GetKey() == 0 {
 		return fmt.Errorf("invalid RevNat ID (0) in the Service Value")
 	}
-	if _, err := key.Map().OpenOrCreate(); err != nil {
+	if err := key.Map().OpenOrCreate(); err != nil {
 		return err
 	}
 

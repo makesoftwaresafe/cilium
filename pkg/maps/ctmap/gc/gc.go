@@ -11,7 +11,6 @@ import (
 
 	"github.com/sirupsen/logrus"
 
-	"github.com/cilium/cilium/pkg/bpf"
 	"github.com/cilium/cilium/pkg/datapath/types"
 	"github.com/cilium/cilium/pkg/endpoint"
 	"github.com/cilium/cilium/pkg/inctimer"
@@ -20,7 +19,6 @@ import (
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/maps/ctmap"
 	"github.com/cilium/cilium/pkg/option"
-	"github.com/cilium/cilium/pkg/signal"
 )
 
 var log = logging.DefaultLogger.WithField(logfields.LogSubsys, "ct-gc")
@@ -40,11 +38,9 @@ func Enable(ipv4, ipv6 bool, restoredEndpoints []*endpoint.Endpoint, mgr Endpoin
 	var (
 		initialScan         = true
 		initialScanComplete = make(chan struct{})
-		mapType             bpf.MapType
 	)
 
 	go func() {
-		var wakeup = make(chan signal.SignalData)
 		ipv4Orig := ipv4
 		ipv6Orig := ipv6
 		triggeredBySignal := false
@@ -94,7 +90,7 @@ func Enable(ipv4, ipv6 bool, restoredEndpoints []*endpoint.Endpoint, mgr Endpoin
 
 			if len(eps) > 0 || initialScan {
 				gcFilter := createGCFilter(initialScan, restoredEndpoints, emitEntryCB, nodeAddressing)
-				mapType, maxDeleteRatio = runGC(nil, ipv4, ipv6, triggeredBySignal, gcFilter)
+				maxDeleteRatio = runGC(nil, ipv4, ipv6, triggeredBySignal, gcFilter)
 			}
 			for _, e := range eps {
 				if !e.ConntrackLocal() {
@@ -112,38 +108,37 @@ func Enable(ipv4, ipv6 bool, restoredEndpoints []*endpoint.Endpoint, mgr Endpoin
 			if initialScan {
 				close(initialScanComplete)
 				initialScan = false
-
-				signal.RegisterChannel(signal.SignalWakeGC, wakeup)
-				signal.SetupSignalListener()
-				signal.MuteChannel(signal.SignalWakeGC)
 			}
 
 			triggeredBySignal = false
-			signal.UnmuteChannel(signal.SignalWakeGC)
+			unmuteSignals()
 			select {
 			case x := <-wakeup:
+				// mute before draining so that no more wakeups are queued just
+				// after we have drained
+				muteSignals()
 				triggeredBySignal = true
 				ipv4 = false
 				ipv6 = false
-				if x == signal.SignalProtoV4 {
+				if x == SignalProtoV4 {
 					ipv4 = true
-				} else if x == signal.SignalProtoV6 {
+				} else if x == SignalProtoV6 {
 					ipv6 = true
 				}
 				// Drain current queue since we just woke up anyway.
 				for len(wakeup) > 0 {
 					x := <-wakeup
-					if x == signal.SignalProtoV4 {
+					if x == SignalProtoV4 {
 						ipv4 = true
-					} else if x == signal.SignalProtoV6 {
+					} else if x == SignalProtoV6 {
 						ipv6 = true
 					}
 				}
-			case <-ctTimer.After(ctmap.GetInterval(mapType, maxDeleteRatio)):
+			case <-ctTimer.After(ctmap.GetInterval(maxDeleteRatio)):
+				muteSignals()
 				ipv4 = ipv4Orig
 				ipv6 = ipv6Orig
 			}
-			signal.MuteChannel(signal.SignalWakeGC)
 		}
 	}()
 
@@ -163,11 +158,23 @@ func Enable(ipv4, ipv6 bool, restoredEndpoints []*endpoint.Endpoint, mgr Endpoin
 // The provided endpoint is optional; if it is provided, then its map will be
 // garbage collected and any failures will be logged to the endpoint log.
 // Otherwise it will garbage-collect the global map and use the global log.
-func runGC(e *endpoint.Endpoint, ipv4, ipv6, triggeredBySignal bool, filter *ctmap.GCFilter) (mapType bpf.MapType, maxDeleteRatio float64) {
+func runGC(e *endpoint.Endpoint, ipv4, ipv6, triggeredBySignal bool, filter *ctmap.GCFilter) (maxDeleteRatio float64) {
 	var maps []*ctmap.Map
 
 	if e == nil {
 		maps = ctmap.GlobalMaps(ipv4, ipv6)
+
+		// We treat per-cluster CT Maps as global map. When we don't enable
+		// cluster-aware addressing, ctmap.PerClusterCTMaps is nil (this is
+		// the default).
+		if ctmap.PerClusterCTMaps != nil {
+			perClusterMaps, err := ctmap.PerClusterCTMaps.GetAllClusterCTMaps()
+			if err != nil {
+				log.Error("Failed to get per-cluster CT maps. Continue without them.")
+			} else {
+				maps = append(maps, perClusterMaps...)
+			}
+		}
 	} else {
 		maps = ctmap.LocalMaps(e, ipv4, ipv6)
 	}
@@ -190,8 +197,6 @@ func runGC(e *endpoint.Endpoint, ipv4, ipv6, triggeredBySignal bool, filter *ctm
 			continue
 		}
 		defer m.Close()
-
-		mapType = m.MapInfo.MapType
 
 		deleted := ctmap.GC(m, filter)
 

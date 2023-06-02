@@ -53,7 +53,7 @@ func ProbeBandwidthManager() {
 		return
 	}
 	if _, err := sysctl.Read("net.core.default_qdisc"); err != nil {
-		log.Warn("BPF bandwidth manager could not read procfs. Disabling the feature.")
+		log.WithError(err).Warn("BPF bandwidth manager could not read procfs. Disabling the feature.")
 		option.Config.EnableBandwidthManager = false
 		return
 	}
@@ -170,7 +170,7 @@ func InitBandwidthManager() {
 
 	log.Info("Setting up BPF bandwidth manager")
 
-	if _, err := bwmap.ThrottleMap().OpenOrCreate(); err != nil {
+	if err := bwmap.ThrottleMap().OpenOrCreate(); err != nil {
 		log.WithError(err).Fatal("Failed to access ThrottleMap")
 	}
 

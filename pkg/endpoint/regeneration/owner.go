@@ -6,7 +6,7 @@ package regeneration
 import (
 	"context"
 
-	"github.com/cilium/cilium/pkg/datapath"
+	datapath "github.com/cilium/cilium/pkg/datapath/types"
 	"github.com/cilium/cilium/pkg/fqdn/restore"
 	"github.com/cilium/cilium/pkg/identity"
 	"github.com/cilium/cilium/pkg/lock"
@@ -35,6 +35,7 @@ type Owner interface {
 
 	// GetDNSRules creates a fresh copy of DNS rules that can be used when
 	// endpoint is restored on a restart.
+	// The endpoint lock must not be held while calling this function.
 	GetDNSRules(epID uint16) restore.DNSRules
 
 	// RemoveRestoredDNSRules removes any restored DNS rules for

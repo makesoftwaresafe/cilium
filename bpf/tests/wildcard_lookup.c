@@ -97,7 +97,7 @@ static inline void __setup_v4(void)
 	cache_key.lpm_key.prefixlen = IPCACHE_PREFIX_LEN(32);
 	cache_key.family = ENDPOINT_KEY_IPV4;
 	cache_key.ip4 = bpf_htonl(HOST_IP);
-	cache_value.sec_label = HOST_ID;
+	cache_value.sec_identity = HOST_ID;
 	map_update_elem(&IPCACHE_MAP, &cache_key, &cache_value, BPF_ANY);
 
 	for (i = 0; i < ARRAY_SIZE(services); i++)
@@ -274,7 +274,7 @@ int test_v4_check(__maybe_unused struct xdp_md *ctx)
 	test_finish();
 }
 
-static inline void __setup_v6_ipcache(union v6addr *HOST_IP6)
+static inline void __setup_v6_ipcache(const union v6addr *HOST_IP6)
 {
 	struct remote_endpoint_info cache_value = {};
 	struct ipcache_key cache_key = {};
@@ -282,11 +282,11 @@ static inline void __setup_v6_ipcache(union v6addr *HOST_IP6)
 	cache_key.lpm_key.prefixlen = IPCACHE_PREFIX_LEN(128);
 	cache_key.family = ENDPOINT_KEY_IPV6;
 	cache_key.ip6 = *HOST_IP6;
-	cache_value.sec_label = HOST_ID;
+	cache_value.sec_identity = HOST_ID;
 	map_update_elem(&IPCACHE_MAP, &cache_key, &cache_value, BPF_ANY);
 }
 
-static inline void __setup_v6_nodeport(union v6addr *HOST_IP6)
+static inline void __setup_v6_nodeport(const union v6addr *HOST_IP6)
 {
 	union v6addr ZERO = {};
 	struct { struct lb6_key key; struct lb6_service value; } services[] = {
@@ -301,7 +301,7 @@ static inline void __setup_v6_nodeport(union v6addr *HOST_IP6)
 				BPF_ANY);
 }
 
-static inline void __setup_v6_hostport(union v6addr *HOST_IP6)
+static inline void __setup_v6_hostport(const union v6addr *HOST_IP6)
 {
 	union v6addr ZERO = {};
 	struct { struct lb6_key key; struct lb6_service value; } services[] = {

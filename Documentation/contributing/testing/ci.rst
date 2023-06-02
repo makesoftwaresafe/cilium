@@ -27,7 +27,7 @@ them all at once:
 +------------------+--------------------------+
 | PR target branch | Trigger required PR jobs |
 +==================+==========================+
-| master           | /test                    |
+| main             | /test                    |
 +------------------+--------------------------+
 | v1.13            | /test-backport-1.13      |
 +------------------+--------------------------+
@@ -36,7 +36,7 @@ them all at once:
 | v1.11            | /test-backport-1.11      |
 +------------------+--------------------------+
 
-For ``master`` PRs: on top of ``/test``, one may use ``/test-missed-k8s`` to
+For ``main`` PRs: on top of ``/test``, one may use ``/test-missed-k8s`` to
 trigger all non-required K8s versions on Kernel 4.9 as per the `Cilium CI
 matrix`_.
 
@@ -93,12 +93,12 @@ example patch that shows how this can be achieved.
                  steps {
                      parallel(
                          "Runtime":{
-    -                        sh 'cd ${TESTDIR}; ginkgo --focus="RuntimeValidated" --tags=integration_tests'
-    +                        sh 'cd ${TESTDIR}; ginkgo --focus="XFoooo" --tags=integration_tests'
+    -                        sh 'cd ${TESTDIR}; ginkgo --focus="RuntimeValidated"'
+    +                        sh 'cd ${TESTDIR}; ginkgo --focus="XFoooo"'
                          },
                          "K8s-1.9":{
-    -                        sh 'cd ${TESTDIR}; K8S_VERSION=1.9 ginkgo --focus="K8sValidated" --tags=integration_tests ${FAILFAST}'
-    +                        sh 'cd ${TESTDIR}; K8S_VERSION=1.9 ginkgo --focus="K8sFooooo" --tags=integration_tests ${FAILFAST}'
+    -                        sh 'cd ${TESTDIR}; K8S_VERSION=1.9 ginkgo --focus="K8sValidated" ${FAILFAST}'
+    +                        sh 'cd ${TESTDIR}; K8S_VERSION=1.9 ginkgo --focus="K8sFooooo" ${FAILFAST}'
                          },
                          failFast: true
                      )
@@ -110,8 +110,8 @@ example patch that shows how this can be achieved.
 
                     })
 
-    -               It("K8sValidated Updating Cilium stable to master", func() {
-    +               FIt("K8sFooooo K8sValidated Updating Cilium stable to master", func() {
+    -               It("K8sValidated Updating Cilium stable to main", func() {
+    +               FIt("K8sFooooo K8sValidated Updating Cilium stable to main", func() {
                             podFilter := "k8s:zgroup=testapp"
 
                             //This test should run in each PR for now.
@@ -180,17 +180,6 @@ After you don't need to run tests on your branch, please remove the branch from 
    +-------------------------------------------------+-------------------------------------------+
 
 
-   Running Runtime test suite is still done via ``/test-focus`` command.
-
-   +----------------------------------------+-------------------------------------------+
-   | ``/test-focus Runtime``                | Runs all runtime tests                    |
-   +----------------------------------------+-------------------------------------------+
-
-.. note::
-
-   It is not possible to run specific tests within the runtime test suite.
-
-
 Cilium-PR-Ginkgo-Tests-Kernel
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
@@ -229,12 +218,12 @@ new builds of the image will be pushed to  `Vagrant Cloud
 the `BUILD_ID <https://wiki.jenkins.io/display/JENKINS/Building+a+software+project#Buildingasoftwareproject-below>`_
 environment variable in the Jenkins job. That version ID will be used in Cilium
 `Vagrantfiles
-<https://github.com/cilium/cilium/blob/master/test/Vagrantfile#L10>`_.
+<https://github.com/cilium/cilium/blob/main/test/Vagrantfile#L10>`_.
 
 Changes to this image are made via contributions to the packer-ci-build
 repository. Authorized GitHub users can trigger builds with a GitHub comment on
 the PR containing the trigger phrase ``/build``. In case that a new box needs to
-be rebased with a different branch than master, authorized developers can run
+be rebased with a different branch than main, authorized developers can run
 the build with custom parameters. To use a different Cilium branch in the `job`_
 go to *Build with parameters* and a base branch can be set as the user needs.
 
@@ -242,9 +231,12 @@ This box will need to be updated when a new developer needs a new dependency
 that is not installed in the current version of the box, or if a dependency that
 is cached within the box becomes stale.
 
+After the pull request to packer-ci-build is merged, builds for master boxes
+have to be triggered `here <https://jenkins.cilium.io/view/Packer%20builds/>`_.
+
 Make sure that you update vagrant box versions in `vagrant_box_defaults.rb
-<https://github.com/cilium/cilium/blob/master/vagrant_box_defaults.rb>`__ after
-new box is built and tested.
+<https://github.com/cilium/cilium/blob/main/vagrant_box_defaults.rb>`__ after
+new boxes are built and tested.
 
 Once you change the image versions locally, create a branch named
 ``pr/update-packer-ci-build`` and open a PR ``github.com/cilium/cilium``.
@@ -304,9 +296,9 @@ GitHub issues using the process below:
 +---------------------------------------+------------------------------------------------------------------+
 | Pipeline                              | Description                                                      |
 +=======================================+==================================================================+
-| `Ginkgo-Tests-Validated-master`_      | Runs whenever a PR is merged into master                         |
+| `Ginkgo-Tests-Validated-master`_      | Runs whenever a PR is merged into main                           |
 +---------------------------------------+------------------------------------------------------------------+
-| `Ginkgo-CI-Tests-Pipeline`_           | Runs every two hours on the master branch                        |
+| `Ginkgo-CI-Tests-Pipeline`_           | Runs every two hours on the main branch                          |
 +---------------------------------------+------------------------------------------------------------------+
 | `Vagrant-Master-Boxes-Packer-Build`_  | Runs on merge into `packer-ci-build`_ repository.                |
 +---------------------------------------+------------------------------------------------------------------+
@@ -387,8 +379,8 @@ Triage process
       issue. It's much more difficult to debug these without context around the
       PR and the changes it introduced. When creating an issue for a PR flake,
       include a description of the code change, the PR, or the diff. If it
-      isn't related to the PR, then it should already happen in master, and a
-      new issue isn't needed.
+      isn't related to the PR, then it should already happen in the ``main``
+      branch, and a new issue isn't needed.
 
 #. Edit the description of the Jenkins build to mark it as triaged. This will
    exclude it from future jenkins-failures.sh output.

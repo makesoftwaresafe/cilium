@@ -18,6 +18,7 @@ import (
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/asm"
 	"github.com/cilium/ebpf/features"
+	"github.com/cilium/ebpf/rlimit"
 	"golang.org/x/sys/unix"
 
 	"github.com/cilium/cilium/pkg/command/exec"
@@ -59,6 +60,9 @@ func init() {
 	}
 }
 
+// ErrNotSupported indicates that a feature is not supported by the current kernel.
+var ErrNotSupported = errors.New("not supported")
+
 // KernelParam is a type based on string which represents CONFIG_* kernel
 // parameters which usually have values "y", "n" or "m".
 type KernelParam string
@@ -90,7 +94,6 @@ type miscFeatures struct {
 }
 
 type FeatureProbes struct {
-	Maps           map[ebpf.MapType]bool
 	ProgramHelpers map[ProgramHelper]bool
 	Misc           miscFeatures
 }
@@ -434,6 +437,85 @@ func HaveV3ISA() error {
 	return nil
 }
 
+// HaveOuterSourceIPSupport tests whether the kernel support setting the outer
+// source IP address via the bpf_skb_set_tunnel_key BPF helper. We can't rely
+// on the verifier to reject a program using the new support because the
+// verifier just accepts any argument size for that helper; non-supported
+// fields will simply not be used. Instead, we set the outer source IP and
+// retrieve it with bpf_skb_get_tunnel_key right after. If the retrieved value
+// equals the value set, we have a confirmation the kernel supports it.
+func HaveOuterSourceIPSupport() (err error) {
+	defer func() {
+		if err != nil && !errors.Is(err, ebpf.ErrNotSupported) {
+			log.WithError(err).Fatal("failed to probe for outer source IP support")
+		}
+	}()
+
+	if err := rlimit.RemoveMemlock(); err != nil {
+		return err
+	}
+
+	progSpec := &ebpf.ProgramSpec{
+		Name:    "set_tunnel_key_probe",
+		Type:    ebpf.SchedACT,
+		License: "GPL",
+	}
+	progSpec.Instructions = asm.Instructions{
+		asm.Mov.Reg(asm.R8, asm.R1),
+
+		asm.Mov.Imm(asm.R2, 0),
+		asm.StoreMem(asm.RFP, -8, asm.R2, asm.DWord),
+		asm.StoreMem(asm.RFP, -16, asm.R2, asm.DWord),
+		asm.StoreMem(asm.RFP, -24, asm.R2, asm.DWord),
+		asm.StoreMem(asm.RFP, -32, asm.R2, asm.DWord),
+		asm.StoreMem(asm.RFP, -40, asm.R2, asm.DWord),
+		asm.Mov.Imm(asm.R2, 42),
+		asm.StoreMem(asm.RFP, -44, asm.R2, asm.Word),
+		asm.Mov.Reg(asm.R2, asm.RFP),
+		asm.Add.Imm(asm.R2, -44),
+		asm.Mov.Imm(asm.R3, 44), // sizeof(struct bpf_tunnel_key) when setting the outer source IP is supported.
+		asm.Mov.Imm(asm.R4, 0),
+		asm.FnSkbSetTunnelKey.Call(),
+
+		asm.Mov.Reg(asm.R1, asm.R8),
+		asm.Mov.Reg(asm.R2, asm.RFP),
+		asm.Add.Imm(asm.R2, -44),
+		asm.Mov.Imm(asm.R3, 44),
+		asm.Mov.Imm(asm.R4, 0),
+		asm.FnSkbGetTunnelKey.Call(),
+
+		asm.LoadMem(asm.R0, asm.RFP, -44, asm.Word),
+		asm.Return(),
+	}
+	prog, err := ebpf.NewProgram(progSpec)
+	if err != nil {
+		return err
+	}
+	defer prog.Close()
+
+	pkt := []byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+	ret, _, err := prog.Test(pkt)
+	if err != nil {
+		return err
+	}
+	if ret != 42 {
+		return ebpf.ErrNotSupported
+	}
+	return nil
+}
+
+// HaveIPv6Support tests whether kernel can open an IPv6 socket. This will
+// also implicitly auto-load IPv6 kernel module if available and not yet
+// loaded.
+func HaveIPv6Support() error {
+	fd, err := unix.Socket(unix.AF_INET6, unix.SOCK_STREAM, 0)
+	if errors.Is(err, unix.EAFNOSUPPORT) || errors.Is(err, unix.EPROTONOSUPPORT) {
+		return ErrNotSupported
+	}
+	unix.Close(fd)
+	return nil
+}
+
 // CreateHeaderFiles creates C header files with macros indicating which BPF
 // features are available in the kernel.
 func CreateHeaderFiles(headerDir string, probes *FeatureProbes) error {
@@ -475,17 +557,8 @@ func CreateHeaderFiles(headerDir string, probes *FeatureProbes) error {
 // be added in the correct `write*Header()` function.
 func ExecuteHeaderProbes() *FeatureProbes {
 	probes := FeatureProbes{
-		Maps:           make(map[ebpf.MapType]bool),
 		ProgramHelpers: make(map[ProgramHelper]bool),
 		Misc:           miscFeatures{},
-	}
-
-	maps := []ebpf.MapType{
-		ebpf.LRUHash,
-		ebpf.LPMTrie,
-	}
-	for _, m := range maps {
-		probes.Maps[m] = (HaveMapType(m) == nil)
 	}
 
 	progHelpers := []ProgramHelper{
@@ -524,8 +597,6 @@ func ExecuteHeaderProbes() *FeatureProbes {
 // writeCommonHeader defines macross for bpf/include/bpf/features.h
 func writeCommonHeader(writer io.Writer, probes *FeatureProbes) error {
 	features := map[string]bool{
-		"HAVE_LRU_HASH_MAP_TYPE": probes.Maps[ebpf.LRUHash],
-		"HAVE_LPM_TRIE_MAP_TYPE": probes.Maps[ebpf.LPMTrie],
 		"HAVE_NETNS_COOKIE": probes.ProgramHelpers[ProgramHelper{ebpf.CGroupSock, asm.FnGetNetnsCookie}] &&
 			probes.ProgramHelpers[ProgramHelper{ebpf.CGroupSockAddr, asm.FnGetNetnsCookie}],
 		"HAVE_SOCKET_COOKIE": probes.ProgramHelpers[ProgramHelper{ebpf.CGroupSockAddr, asm.FnGetSocketCookie}],
@@ -535,16 +606,10 @@ func writeCommonHeader(writer io.Writer, probes *FeatureProbes) error {
 			probes.ProgramHelpers[ProgramHelper{ebpf.XDP, asm.FnJiffies64}],
 		"HAVE_SOCKET_LOOKUP": probes.ProgramHelpers[ProgramHelper{ebpf.CGroupSockAddr, asm.FnSkLookupTcp}] &&
 			probes.ProgramHelpers[ProgramHelper{ebpf.CGroupSockAddr, asm.FnSkLookupUdp}],
-		"HAVE_CGROUP_ID": probes.ProgramHelpers[ProgramHelper{ebpf.CGroupSockAddr, asm.FnGetCurrentCgroupId}],
-		// Before upstream commit d71962f3e627 (4.18), map helpers were not
-		// allowed to access map values directly. So for those older kernels,
-		// we need to copy the data to the stack first.
-		// We don't have a probe for that, but the bpf_fib_lookup helper was
-		// introduced in the same release.
-		"HAVE_DIRECT_ACCESS_TO_MAP_VALUES": probes.ProgramHelpers[ProgramHelper{ebpf.SchedCLS, asm.FnFibLookup}],
-		"HAVE_LARGE_INSN_LIMIT":            probes.Misc.HaveLargeInsnLimit,
-		"HAVE_SET_RETVAL":                  probes.ProgramHelpers[ProgramHelper{ebpf.CGroupSock, asm.FnSetRetval}],
-		"HAVE_FIB_NEIGH":                   probes.ProgramHelpers[ProgramHelper{ebpf.SchedCLS, asm.FnRedirectNeigh}],
+		"HAVE_CGROUP_ID":        probes.ProgramHelpers[ProgramHelper{ebpf.CGroupSockAddr, asm.FnGetCurrentCgroupId}],
+		"HAVE_LARGE_INSN_LIMIT": probes.Misc.HaveLargeInsnLimit,
+		"HAVE_SET_RETVAL":       probes.ProgramHelpers[ProgramHelper{ebpf.CGroupSock, asm.FnSetRetval}],
+		"HAVE_FIB_NEIGH":        probes.ProgramHelpers[ProgramHelper{ebpf.SchedCLS, asm.FnRedirectNeigh}],
 		// Check if kernel has d1c362e1dd68 ("bpf: Always return target ifindex
 		// in bpf_fib_lookup") which is 5.10+. This got merged in the same kernel
 		// as the new redirect helpers.

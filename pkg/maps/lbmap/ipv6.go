@@ -195,7 +195,7 @@ func (k *Service6Key) ToHost() ServiceKey {
 // +k8s:deepcopy-gen=true
 // +k8s:deepcopy-gen:interfaces=github.com/cilium/cilium/pkg/bpf.MapValue
 type Service6Value struct {
-	BackendID uint32    `align:"backend_id"`
+	BackendID uint32    `align:"$union0"`
 	Count     uint16    `align:"count"`
 	RevNat    uint16    `align:"rev_nat_index"`
 	Flags     uint8     `align:"flags"`
@@ -512,9 +512,7 @@ func CreateSockRevNat6Map() error {
 		int(unsafe.Sizeof(SockRevNat6Value{})),
 		MaxSockRevNat6MapEntries,
 		0,
-		0,
 		bpf.ConvertKeyValue,
 	).WithPressureMetric()
-	_, err := sockRevNat6Map.Create()
-	return err
+	return sockRevNat6Map.Create()
 }

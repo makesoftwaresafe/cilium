@@ -4,6 +4,7 @@
 package ciliumenvoyconfig
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
@@ -21,7 +22,6 @@ import (
 	"google.golang.org/protobuf/types/known/wrapperspb"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/tools/cache"
 
 	"github.com/cilium/cilium/pkg/envoy"
@@ -33,16 +33,18 @@ import (
 )
 
 type envoyConfigManager struct {
-	client     client.Clientset
-	informer   cache.Controller
-	store      cache.Store
-	maxRetries int
+	client             client.Clientset
+	informer           cache.Controller
+	store              cache.Store
+	maxRetries         int
+	idleTimeoutSeconds int
 }
 
-func newEnvoyConfigManager(client client.Clientset, maxRetries int) (*envoyConfigManager, error) {
+func newEnvoyConfigManager(ctx context.Context, client client.Clientset, maxRetries int, idleTimeoutSeconds int) (*envoyConfigManager, error) {
 	manager := &envoyConfigManager{
-		client:     client,
-		maxRetries: maxRetries,
+		client:             client,
+		maxRetries:         maxRetries,
+		idleTimeoutSeconds: idleTimeoutSeconds,
 	}
 
 	manager.store, manager.informer = informer.NewInformer(
@@ -53,8 +55,8 @@ func newEnvoyConfigManager(client client.Clientset, maxRetries int) (*envoyConfi
 		nil,
 	)
 
-	go manager.informer.Run(wait.NeverStop)
-	if !cache.WaitForCacheSync(wait.NeverStop, manager.informer.HasSynced) {
+	go manager.informer.Run(ctx.Done())
+	if !cache.WaitForCacheSync(ctx.Done(), manager.informer.HasSynced) {
 		return manager, fmt.Errorf("unable to sync envoy configs")
 	}
 	return manager, nil
@@ -144,6 +146,9 @@ func (m *Manager) getClusterResources(svc *slim_corev1.Service) ([]ciliumv2.XDSR
 		LbPolicy:       envoy_config_cluster_v3.Cluster_LbPolicy(lbPolicy),
 		TypedExtensionProtocolOptions: map[string]*anypb.Any{
 			"envoy.extensions.upstreams.http.v3.HttpProtocolOptions": toAny(&envoy_config_upstream.HttpProtocolOptions{
+				CommonHttpProtocolOptions: &envoy_config_core_v3.HttpProtocolOptions{
+					IdleTimeout: &durationpb.Duration{Seconds: int64(m.idleTimeoutSeconds)},
+				},
 				UpstreamProtocolOptions: &envoy_config_upstream.HttpProtocolOptions_UseDownstreamProtocolConfig{
 					UseDownstreamProtocolConfig: &envoy_config_upstream.HttpProtocolOptions_UseDownstreamHttpConfig{
 						Http2ProtocolOptions: &envoy_config_core_v3.Http2ProtocolOptions{},
@@ -266,6 +271,8 @@ func (m *Manager) getConnectionManager(svc *slim_corev1.Service) (ciliumv2.XDSRe
 				RouteConfigName: getName(svc),
 			},
 		},
+		UseRemoteAddress: &wrapperspb.BoolValue{Value: true},
+		SkipXffAppend:    false,
 		HttpFilters: []*envoy_extensions_filters_network_http_connection_manager_v3.HttpFilter{
 			{
 				Name: "envoy.filters.http.router",

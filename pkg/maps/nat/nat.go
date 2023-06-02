@@ -102,7 +102,7 @@ func NewMap(name string, v4 bool, entries int) *Map {
 			mapValue,
 			sizeVal,
 			entries,
-			0, 0,
+			0,
 			bpf.ConvertKeyValue,
 		).WithCache().WithEvents(option.Config.GetEventBufferConfig(name)),
 		v4: v4,
@@ -302,6 +302,27 @@ func GlobalMaps(ipv4, ipv6, nodeport bool) (ipv4Map, ipv6Map *Map) {
 	}
 	if ipv6 {
 		ipv6Map = NewMap(MapNameSnat6Global, false, entries)
+	}
+	return
+}
+
+// ClusterMaps returns all NAT maps for given clusters
+func ClusterMaps(clusterID uint32, ipv4, ipv6 bool) (ipv4Map, ipv6Map *Map, err error) {
+	if PerClusterNATMaps == nil {
+		err = fmt.Errorf("Per-cluster NAT maps are not initialized")
+		return
+	}
+	if ipv4 {
+		ipv4Map, err = PerClusterNATMaps.GetClusterNATMap(clusterID, true)
+		if err != nil {
+			return
+		}
+	}
+	if ipv6 {
+		ipv6Map, err = PerClusterNATMaps.GetClusterNATMap(clusterID, false)
+		if err != nil {
+			return
+		}
 	}
 	return
 }

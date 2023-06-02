@@ -21,10 +21,11 @@ import (
 	"k8s.io/client-go/tools/cache"
 	k8s_metrics "k8s.io/client-go/tools/metrics"
 
+	agentK8s "github.com/cilium/cilium/daemon/k8s"
 	"github.com/cilium/cilium/pkg/cidr"
 	cmtypes "github.com/cilium/cilium/pkg/clustermesh/types"
 	"github.com/cilium/cilium/pkg/controller"
-	"github.com/cilium/cilium/pkg/datapath"
+	datapath "github.com/cilium/cilium/pkg/datapath/types"
 	"github.com/cilium/cilium/pkg/egressgateway"
 	"github.com/cilium/cilium/pkg/endpoint"
 	"github.com/cilium/cilium/pkg/envoy"
@@ -67,6 +68,7 @@ const (
 	k8sAPIGroupNetworkingV1Core                 = "networking.k8s.io/v1::NetworkPolicy"
 	k8sAPIGroupCiliumNetworkPolicyV2            = "cilium/v2::CiliumNetworkPolicy"
 	k8sAPIGroupCiliumClusterwideNetworkPolicyV2 = "cilium/v2::CiliumClusterwideNetworkPolicy"
+	k8sAPIGroupCiliumCIDRGroupV2Alpha1          = "cilium/v2alpha1::CiliumCIDRGroup"
 	k8sAPIGroupCiliumNodeV2                     = "cilium/v2::CiliumNode"
 	k8sAPIGroupCiliumEndpointV2                 = "cilium/v2::CiliumEndpoint"
 	k8sAPIGroupCiliumLocalRedirectPolicyV2      = "cilium/v2::CiliumLocalRedirectPolicy"
@@ -131,7 +133,7 @@ type nodeDiscoverManager interface {
 type policyManager interface {
 	TriggerPolicyUpdates(force bool, reason string)
 	PolicyAdd(rules api.Rules, opts *policy.AddOptions) (newRev uint64, err error)
-	PolicyDelete(labels labels.LabelArray) (newRev uint64, err error)
+	PolicyDelete(labels labels.LabelArray, opts *policy.DeleteOptions) (newRev uint64, err error)
 }
 
 type policyRepository interface {
@@ -165,7 +167,7 @@ type bgpSpeakerManager interface {
 	OnUpdateEndpointSliceV1(eps *slim_discover_v1.EndpointSlice) error
 	OnUpdateEndpointSliceV1Beta1(eps *slim_discover_v1beta1.EndpointSlice) error
 }
-type egressGatewayManager interface {
+type EgressGatewayManager interface {
 	OnAddEgressPolicy(config egressgateway.PolicyConfig)
 	OnDeleteEgressPolicy(configID types.NamespacedName)
 	OnUpdateEndpoint(endpoint *k8sTypes.CiliumEndpoint)
@@ -180,7 +182,7 @@ type envoyConfigManager interface {
 	DeleteEnvoyResources(context.Context, envoy.Resources, envoy.PortAllocator) error
 
 	// envoy.PortAllocator
-	AllocateProxyPort(name string, ingress bool) (uint16, error)
+	AllocateProxyPort(name string, ingress, localOnly bool) (uint16, error)
 	AckProxyPort(ctx context.Context, name string) error
 	ReleaseProxyPort(name string) error
 }
@@ -218,7 +220,7 @@ type K8sWatcher struct {
 	k8sAPIGroups synced.APIGroups
 
 	// K8sSvcCache is a cache of all Kubernetes services and endpoints
-	K8sSvcCache k8s.ServiceCache
+	K8sSvcCache *k8s.ServiceCache
 
 	// NodeChain is the root of a notification chain for k8s Node events.
 	// This NodeChain allows registration of subscriber.Node implementations.
@@ -240,7 +242,7 @@ type K8sWatcher struct {
 	svcManager            svcManager
 	redirectPolicyManager redirectPolicyManager
 	bgpSpeakerManager     bgpSpeakerManager
-	egressGatewayManager  egressGatewayManager
+	egressGatewayManager  EgressGatewayManager
 	ipcache               ipcacheManager
 	envoyConfigManager    envoyConfigManager
 	cgroupManager         cgroupManager
@@ -277,7 +279,7 @@ type K8sWatcher struct {
 
 	cfg WatcherConfiguration
 
-	sharedResources k8s.SharedResources
+	resources agentK8s.Resources
 }
 
 func NewK8sWatcher(
@@ -290,16 +292,17 @@ func NewK8sWatcher(
 	datapath datapath.Datapath,
 	redirectPolicyManager redirectPolicyManager,
 	bgpSpeakerManager bgpSpeakerManager,
-	egressGatewayManager egressGatewayManager,
+	egressGatewayManager EgressGatewayManager,
 	envoyConfigManager envoyConfigManager,
 	cfg WatcherConfiguration,
 	ipcache ipcacheManager,
 	cgroupManager cgroupManager,
-	sharedResources k8s.SharedResources,
+	resources agentK8s.Resources,
+	serviceCache *k8s.ServiceCache,
 ) *K8sWatcher {
 	return &K8sWatcher{
 		clientset:             clientset,
-		K8sSvcCache:           k8s.NewServiceCache(datapath.LocalNodeAddressing()),
+		K8sSvcCache:           serviceCache,
 		endpointManager:       endpointManager,
 		nodeDiscoverManager:   nodeDiscoverManager,
 		policyManager:         policyManager,
@@ -318,7 +321,7 @@ func NewK8sWatcher(
 		CiliumNodeChain:       subscriber.NewCiliumNodeChain(),
 		envoyConfigManager:    envoyConfigManager,
 		cfg:                   cfg,
-		sharedResources:       sharedResources,
+		resources:             resources,
 	}
 }
 
@@ -421,7 +424,7 @@ var ciliumResourceToGroupMapping = map[string]watcherInfo{
 	synced.CRDResourceName(v2alpha1.BGPPName):     {skip, ""}, // Handled in BGP control plane
 	synced.CRDResourceName(v2alpha1.LBIPPoolName): {skip, ""}, // Handled in LB IPAM
 	synced.CRDResourceName(v2alpha1.CNCName):      {skip, ""}, // Handled by init directly
-
+	synced.CRDResourceName(v2alpha1.CCGName):      {start, k8sAPIGroupCiliumCIDRGroupV2Alpha1},
 }
 
 // resourceGroups are all of the core Kubernetes and Cilium resource groups
@@ -540,6 +543,8 @@ func (k *K8sWatcher) enableK8sWatchers(ctx context.Context, resourceNames []stri
 		return fmt.Errorf("error creating service list option modifier: %w", err)
 	}
 
+	// CNP, CCNP, and CCG resources are handled together.
+	var cnpOnce sync.Once
 	for _, r := range resourceNames {
 		switch r {
 		// Core Cilium
@@ -570,10 +575,8 @@ func (k *K8sWatcher) enableK8sWatchers(ctx context.Context, resourceNames []stri
 			// only watch secrets in specific namespaces
 			k.tlsSecretInit(k.clientset.Slim(), option.Config.EnvoySecretNamespaces, swgSecret)
 		// Custom resource definitions
-		case k8sAPIGroupCiliumNetworkPolicyV2:
-			k.ciliumNetworkPoliciesInit(k.clientset)
-		case k8sAPIGroupCiliumClusterwideNetworkPolicyV2:
-			k.ciliumClusterwideNetworkPoliciesInit(k.clientset)
+		case k8sAPIGroupCiliumNetworkPolicyV2, k8sAPIGroupCiliumClusterwideNetworkPolicyV2, k8sAPIGroupCiliumCIDRGroupV2Alpha1:
+			cnpOnce.Do(func() { k.ciliumNetworkPoliciesInit(ctx, k.clientset) })
 		case k8sAPIGroupCiliumEndpointV2:
 			k.initCiliumEndpointOrSlices(k.clientset, asyncControllers)
 		case k8sAPIGroupCiliumEndpointSliceV2Alpha1:
@@ -951,6 +954,7 @@ func (k *K8sWatcher) addK8sSVCs(svcID k8s.ServiceID, oldSvc, svc *k8s.Service, e
 			Name: loadbalancer.ServiceName{
 				Name:      svcID.Name,
 				Namespace: svcID.Namespace,
+				Cluster:   svcID.Cluster,
 			},
 		}
 		if _, _, err := k.svcManager.UpsertService(p); err != nil {

@@ -17,11 +17,11 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/cache"
 
+	"github.com/cilium/cilium/operator/k8s"
 	"github.com/cilium/cilium/operator/watchers"
 	"github.com/cilium/cilium/pkg/defaults"
 	"github.com/cilium/cilium/pkg/hive"
 	"github.com/cilium/cilium/pkg/hive/cell"
-	"github.com/cilium/cilium/pkg/k8s"
 	v2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
 	k8sClient "github.com/cilium/cilium/pkg/k8s/client"
 	"github.com/cilium/cilium/pkg/k8s/informer"
@@ -29,16 +29,14 @@ import (
 	"github.com/cilium/cilium/pkg/option"
 )
 
-func TestMain(m *testing.M) {
-	goleak.VerifyTestMain(
-		m,
+func TestIdentitiesGC(t *testing.T) {
+	defer goleak.VerifyNone(
+		t,
 		// To ignore goroutine started from sigs.k8s.io/controller-runtime/pkg/log.go
 		// init function
 		goleak.IgnoreTopFunction("time.Sleep"),
 	)
-}
 
-func TestIdentitiesGC(t *testing.T) {
 	var clientset k8sClient.Clientset
 
 	hive := hive.New(
@@ -46,7 +44,7 @@ func TestIdentitiesGC(t *testing.T) {
 		k8sClient.FakeClientCell,
 
 		// provide resources
-		k8s.SharedResourcesCell,
+		k8s.ResourcesCell,
 
 		// provide identities gc test configuration
 		cell.Provide(func() Config {

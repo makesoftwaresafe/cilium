@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"math"
 	"net"
+	"net/netip"
 	"regexp"
 	"strconv"
 	"strings"
@@ -27,6 +28,7 @@ import (
 	"github.com/cilium/cilium/pkg/fqdn/re"
 	"github.com/cilium/cilium/pkg/fqdn/restore"
 	"github.com/cilium/cilium/pkg/identity"
+	ippkg "github.com/cilium/cilium/pkg/ip"
 	"github.com/cilium/cilium/pkg/ipcache"
 	"github.com/cilium/cilium/pkg/lock"
 	"github.com/cilium/cilium/pkg/logging"
@@ -57,12 +59,6 @@ const (
 // A singleton is always running inside cilium-agent.
 // Note: All public fields are read only and do not require locking
 type DNSProxy struct {
-	// BindAddr is the local address the server is using to listen for DNS
-	// requests. This is a read-only value and reflects the actual value. Passing
-	// ":0" to StartDNSProxy will allow the kernel to set the port, and that can
-	// be read here.
-	BindAddr string
-
 	// BindPort is the port in BindAddr.
 	BindPort uint16
 
@@ -92,9 +88,11 @@ type DNSProxy struct {
 	// design now.
 	NotifyOnDNSMsg NotifyOnDNSMsgFunc
 
-	// UDPServer, TCPServer are the miekg/dns server instances. They handle DNS
-	// parsing etc. for us.
-	UDPServer, TCPServer *dns.Server
+	// DNSServers are the miekg/dns server instances.
+	// Depending on the configuration, these might be
+	// TCPv4, UDPv4, TCPv6 and/or UDPv4.
+	// They handle DNS parsing etc. for us.
+	DNSServers []*dns.Server
 
 	// EnableDNSCompression allows the DNS proxy to compress responses to
 	// endpoints that are larger than 512 Bytes or the EDNS0 option, if present.
@@ -216,50 +214,88 @@ func (p *DNSProxy) checkRestored(endpointID uint64, destPort uint16, destIP stri
 	return false
 }
 
+// skipIPInRestorationRLocked skips IPs that are allowed but have never been used,
+// but only if at least one server has been used so far.
+// Requires the RLock to be held.
+func (p *DNSProxy) skipIPInRestorationRLocked(ip string) bool {
+	if len(p.usedServers) > 0 {
+		if _, used := p.usedServers[ip]; !used {
+			return true
+		}
+	}
+	return false
+}
+
 // GetRules creates a fresh copy of EP's DNS rules to be stored
 // for later restoration.
 func (p *DNSProxy) GetRules(endpointID uint16) (restore.DNSRules, error) {
+	// Lock ordering note: Acquiring the IPCache read lock (as LookupIPsBySecID does) while holding
+	// the proxy lock can lead to a deadlock. Avoid this by reading the state from DNSProxy while
+	// holding the read lock, then perform the IPCache lookups.
+	// Note that IPCache state may change in between calls to LookupIPsBySecID.
 	p.RLock()
-	defer p.RUnlock()
+
+	type selRegex struct {
+		re *regexp.Regexp
+		cs policy.CachedSelector
+	}
+
+	portToSelRegex := make(map[uint16][]selRegex)
+	for port, entries := range p.allowed[uint64(endpointID)] {
+		var nidRules = make([]selRegex, 0, len(entries))
+		// Copy the entries to avoid racy map accesses after we release the lock. We don't need
+		// constant time access, hence a preallocated slice instead of another map.
+		for cs, regex := range entries {
+			nidRules = append(nidRules, selRegex{cs: cs, re: regex})
+		}
+		portToSelRegex[port] = nidRules
+	}
+
+	// We've read what we need from the proxy. The following IPCache lookups _must_ occur outside of
+	// the critical section.
+	p.RUnlock()
 
 	restored := make(restore.DNSRules)
-	for port, entries := range p.allowed[uint64(endpointID)] {
+	for port, selRegexes := range portToSelRegex {
 		var ipRules restore.IPRules
-		for cs, regex := range entries {
-			var IPs map[string]struct{}
-			if !cs.IsWildcard() {
-				IPs = make(map[string]struct{})
-				count := 0
-			Loop:
-				for _, nid := range cs.GetSelections() {
-					nidIPs := p.LookupIPsBySecID(nid)
-					for _, ip := range nidIPs {
-						// Skip IPs that are allowed but have never been used,
-						// but only if at least one server has been used so far.
-						if len(p.usedServers) > 0 {
-							if _, used := p.usedServers[ip]; !used {
-								continue
-							}
-						}
-						IPs[ip] = struct{}{}
-						count++
-						if count > p.maxIPsPerRestoredDNSRule {
-							log.WithFields(logrus.Fields{
-								logfields.EndpointID:            endpointID,
-								logfields.Port:                  port,
-								logfields.EndpointLabelSelector: cs,
-								logfields.Limit:                 p.maxIPsPerRestoredDNSRule,
-								logfields.Count:                 len(nidIPs),
-							}).Warning("Too many IPs for a DNS rule, skipping the rest")
-							break Loop
-						}
+		for _, selRegex := range selRegexes {
+			if selRegex.cs.IsWildcard() {
+				ipRules = append(ipRules, asIPRule(selRegex.re, nil))
+				continue
+			}
+			ips := make(map[string]struct{})
+			count := 0
+			nids := selRegex.cs.GetSelections()
+		Loop:
+			for _, nid := range nids {
+				// Note: p.RLock must not be held during this call to IPCache
+				nidIPs := p.LookupIPsBySecID(nid)
+				p.RLock()
+				for _, ip := range nidIPs {
+					if p.skipIPInRestorationRLocked(ip) {
+						continue
+					}
+					ips[ip] = struct{}{}
+					count++
+					if count > p.maxIPsPerRestoredDNSRule {
+						log.WithFields(logrus.Fields{
+							logfields.EndpointID:            endpointID,
+							logfields.Port:                  port,
+							logfields.EndpointLabelSelector: selRegex.cs,
+							logfields.Limit:                 p.maxIPsPerRestoredDNSRule,
+							logfields.Count:                 len(nidIPs),
+						}).Warning("Too many IPs for a DNS rule, skipping the rest")
+						p.RUnlock()
+						break Loop
 					}
 				}
+				p.RUnlock()
 			}
-			ipRules = append(ipRules, asIPRule(regex, IPs))
+			ipRules = append(ipRules, asIPRule(selRegex.re, ips))
 		}
 		restored[port] = ipRules
 	}
+
 	return restored, nil
 }
 
@@ -473,7 +509,7 @@ type LookupEndpointIDByIPFunc func(ip net.IP) (endpoint *endpoint.Endpoint, err 
 // LookupSecIDByIPFunc Func wraps logic to lookup an IP's security ID from the
 // ipcache.
 // See DNSProxy.LookupSecIDByIP for usage.
-type LookupSecIDByIPFunc func(ip net.IP) (secID ipcache.Identity, exists bool)
+type LookupSecIDByIPFunc func(ip netip.Addr) (secID ipcache.Identity, exists bool)
 
 // LookupIPsBySecIDFunc Func wraps logic to lookup an IPs by security ID from the
 // ipcache.
@@ -598,18 +634,16 @@ func StartDNSProxy(
 	}
 	atomic.StoreInt32(&p.rejectReply, dns.RcodeRefused)
 
-	// Start the DNS listeners on UDP and TCP
+	// Start the DNS listeners on UDP and TCP for IPv4 and/or IPv6
 	var (
-		UDPConn     *net.UDPConn
-		TCPListener *net.TCPListener
-		err         error
-
-		EnableIPv4, EnableIPv6 = option.Config.EnableIPv4, option.Config.EnableIPv6
+		dnsServers []*dns.Server
+		bindPort   uint16
+		err        error
 	)
 
 	start := time.Now()
 	for time.Since(start) < ProxyBindTimeout {
-		UDPConn, TCPListener, err = bindToAddr(address, port, EnableIPv4, EnableIPv6)
+		dnsServers, bindPort, err = bindToAddr(address, port, p, option.Config.EnableIPv4, option.Config.EnableIPv6)
 		if err == nil {
 			break
 		}
@@ -617,39 +651,48 @@ func StartDNSProxy(
 		time.Sleep(ProxyBindRetryInterval)
 	}
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to bind DNS proxy: %w", err)
 	}
 
-	p.BindAddr = UDPConn.LocalAddr().String()
-	p.BindPort = uint16(UDPConn.LocalAddr().(*net.UDPAddr).Port)
-	p.UDPServer = &dns.Server{PacketConn: UDPConn, Addr: p.BindAddr, Net: "udp", Handler: p,
-		SessionUDPFactory: &sessionUDPFactory{ipv4Enabled: EnableIPv4, ipv6Enabled: EnableIPv6},
-	}
-	p.TCPServer = &dns.Server{Listener: TCPListener, Addr: p.BindAddr, Net: "tcp", Handler: p}
-	log.WithField("address", p.BindAddr).Debug("DNS Proxy bound to address")
+	p.BindPort = bindPort
+	p.DNSServers = dnsServers
 
-	for _, s := range []*dns.Server{p.UDPServer, p.TCPServer} {
+	log.WithField("port", bindPort).WithField("addresses", len(dnsServers)).Debug("DNS Proxy bound to addresses")
+
+	for _, s := range p.DNSServers {
 		go func(server *dns.Server) {
 			// try 5 times during a single ProxyBindTimeout period. We fatal here
 			// because we have no other way to indicate failure this late.
 			start := time.Now()
+			var err error
 			for time.Since(start) < ProxyBindTimeout {
-				if err := server.ActivateAndServe(); err != nil {
+				log.Debugf("Trying to start the %s DNS proxy on %s", server.Net, server.Addr)
+
+				if err = server.ActivateAndServe(); err != nil {
 					log.WithError(err).Errorf("Failed to start the %s DNS proxy on %s", server.Net, server.Addr)
+					time.Sleep(ProxyBindRetryInterval)
+					continue
 				}
-				time.Sleep(ProxyBindRetryInterval)
+				break // successful shutdown before timeout
 			}
-			log.Fatalf("Failed to start %s DNS Proxy on %s", server.Net, server.Addr)
+			if err != nil {
+				log.WithError(err).Fatalf("Failed to start the %s DNS proxy on %s", server.Net, server.Addr)
+			}
 		}(s)
 	}
 
 	// This function is called in proxy.Cleanup, which is added to Daemon cleanup module in bootstrapFQDN
-	p.unbindAddress = func() {
-		UDPConn.Close()
-		TCPListener.Close()
-	}
+	p.unbindAddress = func() { shutdownServers(p.DNSServers) }
 
 	return p, nil
+}
+
+func shutdownServers(dnsServers []*dns.Server) {
+	for _, s := range dnsServers {
+		if err := s.Shutdown(); err != nil {
+			log.WithError(err).Errorf("Failed to stop the %s DNS proxy on %s", s.Net, s.Addr)
+		}
+	}
 }
 
 // LookupEndpointByIP wraps LookupRegisteredEndpoint by falling back to an restored EP, if available
@@ -798,22 +841,24 @@ func (p *DNSProxy) ServeDNS(w dns.ResponseWriter, request *dns.Msg) {
 		logfields.Identity:   ep.GetIdentity(),
 	})
 
-	targetServerIP, targetServerPort, targetServerAddr, err := p.lookupTargetDNSServer(w)
+	targetServerIP, targetServerPort, targetServerAddrStr, err := p.lookupTargetDNSServer(w)
 	if err != nil {
 		log.WithError(err).Error("cannot extract destination IP:port from DNS request")
 		stat.Err = fmt.Errorf("Cannot extract destination IP:port from DNS request: %w", err)
 		stat.ProcessingTime.End(false)
-		p.NotifyOnDNSMsg(time.Now(), ep, epIPPort, 0, targetServerAddr, request, protocol, false, &stat)
+		p.NotifyOnDNSMsg(time.Now(), ep, epIPPort, 0, targetServerAddrStr, request, protocol, false, &stat)
 		p.sendRefused(scopedLog, w, request)
 		return
 	}
 
 	targetServerID := identity.ReservedIdentityWorld
-	if serverSecID, exists := p.LookupSecIDByIP(targetServerIP); !exists {
-		scopedLog.WithField("server", targetServerAddr).Debug("cannot find server ip in ipcache, defaulting to WORLD")
+	// Ignore invalid IP - getter will handle invalid value.
+	targetServerAddr, _ := ippkg.AddrFromIP(targetServerIP)
+	if serverSecID, exists := p.LookupSecIDByIP(targetServerAddr); !exists {
+		scopedLog.WithField("server", targetServerAddrStr).Debug("cannot find server ip in ipcache, defaulting to WORLD")
 	} else {
 		targetServerID = serverSecID.ID
-		scopedLog.WithField("server", targetServerAddr).Debugf("Found target server to of DNS request secID %+v", serverSecID)
+		scopedLog.WithField("server", targetServerAddrStr).Debugf("Found target server to of DNS request secID %+v", serverSecID)
 	}
 
 	// The allowed check is first because we don't want to use DNS responses that
@@ -829,7 +874,7 @@ func (p *DNSProxy) ServeDNS(w dns.ResponseWriter, request *dns.Msg) {
 		scopedLog.WithError(err).Error("Rejecting DNS query from endpoint due to error")
 		stat.Err = fmt.Errorf("Rejecting DNS query from endpoint due to error: %w", err)
 		stat.ProcessingTime.End(false)
-		p.NotifyOnDNSMsg(time.Now(), ep, epIPPort, targetServerID, targetServerAddr, request, protocol, false, &stat)
+		p.NotifyOnDNSMsg(time.Now(), ep, epIPPort, targetServerID, targetServerAddrStr, request, protocol, false, &stat)
 		p.sendRefused(scopedLog, w, request)
 		return
 
@@ -841,12 +886,12 @@ func (p *DNSProxy) ServeDNS(w dns.ResponseWriter, request *dns.Msg) {
 		// information for metrics.
 		stat.Err = p.sendRefused(scopedLog, w, request)
 		stat.ProcessingTime.End(true)
-		p.NotifyOnDNSMsg(time.Now(), ep, epIPPort, targetServerID, targetServerAddr, request, protocol, false, &stat)
+		p.NotifyOnDNSMsg(time.Now(), ep, epIPPort, targetServerID, targetServerAddrStr, request, protocol, false, &stat)
 		return
 	}
 
 	scopedLog.Debug("Forwarding DNS request for a name that is allowed")
-	p.NotifyOnDNSMsg(time.Now(), ep, epIPPort, targetServerID, targetServerAddr, request, protocol, true, &stat)
+	p.NotifyOnDNSMsg(time.Now(), ep, epIPPort, targetServerID, targetServerAddrStr, request, protocol, true, &stat)
 
 	// Keep the same L4 protocol. This handles DNS re-requests over TCP, for
 	// requests that were too large for UDP.
@@ -860,7 +905,7 @@ func (p *DNSProxy) ServeDNS(w dns.ResponseWriter, request *dns.Msg) {
 		scopedLog.Error("Cannot parse DNS proxy client network to select forward client")
 		stat.Err = fmt.Errorf("Cannot parse DNS proxy client network to select forward client: %w", err)
 		stat.ProcessingTime.End(false)
-		p.NotifyOnDNSMsg(time.Now(), ep, epIPPort, targetServerID, targetServerAddr, request, protocol, false, &stat)
+		p.NotifyOnDNSMsg(time.Now(), ep, epIPPort, targetServerID, targetServerAddrStr, request, protocol, false, &stat)
 		p.sendRefused(scopedLog, w, request)
 		return
 	}
@@ -880,12 +925,12 @@ func (p *DNSProxy) ServeDNS(w dns.ResponseWriter, request *dns.Msg) {
 		}}
 	client.Dialer = &dialer
 
-	conn, err := client.Dial(targetServerAddr)
+	conn, err := client.Dial(targetServerAddrStr)
 	if err != nil {
-		err := fmt.Errorf("failed to dial connection to %v: %w", targetServerAddr, err)
+		err := fmt.Errorf("failed to dial connection to %v: %w", targetServerAddrStr, err)
 		stat.Err = err
 		scopedLog.WithError(err).Error("Failed to dial connection to the upstream DNS server, cannot service DNS request")
-		p.NotifyOnDNSMsg(time.Now(), ep, epIPPort, targetServerID, targetServerAddr, request, protocol, false, &stat)
+		p.NotifyOnDNSMsg(time.Now(), ep, epIPPort, targetServerID, targetServerAddrStr, request, protocol, false, &stat)
 		p.sendRefused(scopedLog, w, request)
 		return
 	}
@@ -898,12 +943,12 @@ func (p *DNSProxy) ServeDNS(w dns.ResponseWriter, request *dns.Msg) {
 		stat.Err = err
 		if stat.IsTimeout() {
 			scopedLog.WithError(err).Warn("Timeout waiting for response to forwarded proxied DNS lookup")
-			p.NotifyOnDNSMsg(time.Now(), ep, epIPPort, targetServerID, targetServerAddr, request, protocol, false, &stat)
+			p.NotifyOnDNSMsg(time.Now(), ep, epIPPort, targetServerID, targetServerAddrStr, request, protocol, false, &stat)
 			return
 		}
 		scopedLog.WithError(err).Error("Cannot forward proxied DNS lookup")
 		stat.Err = fmt.Errorf("cannot forward proxied DNS lookup: %w", err)
-		p.NotifyOnDNSMsg(time.Now(), ep, epIPPort, targetServerID, targetServerAddr, request, protocol, false, &stat)
+		p.NotifyOnDNSMsg(time.Now(), ep, epIPPort, targetServerID, targetServerAddrStr, request, protocol, false, &stat)
 		p.sendRefused(scopedLog, w, request)
 		return
 	}
@@ -912,7 +957,7 @@ func (p *DNSProxy) ServeDNS(w dns.ResponseWriter, request *dns.Msg) {
 	stat.Success = true
 
 	scopedLog.Debug("Notifying with DNS response to original DNS query")
-	p.NotifyOnDNSMsg(time.Now(), ep, epIPPort, targetServerID, targetServerAddr, response, protocol, true, &stat)
+	p.NotifyOnDNSMsg(time.Now(), ep, epIPPort, targetServerID, targetServerAddrStr, response, protocol, true, &stat)
 
 	scopedLog.Debug("Responding to original DNS query")
 	// restore the ID to the one in the initial request so it matches what the requester expects.
@@ -922,7 +967,7 @@ func (p *DNSProxy) ServeDNS(w dns.ResponseWriter, request *dns.Msg) {
 	if err != nil {
 		scopedLog.WithError(err).Error("Cannot forward proxied DNS response")
 		stat.Err = fmt.Errorf("Cannot forward proxied DNS response: %w", err)
-		p.NotifyOnDNSMsg(time.Now(), ep, epIPPort, targetServerID, targetServerAddr, response, protocol, true, &stat)
+		p.NotifyOnDNSMsg(time.Now(), ep, epIPPort, targetServerID, targetServerAddrStr, response, protocol, true, &stat)
 	} else {
 		p.Lock()
 		// Add the server to the set of used DNS servers. This set is never GCd, but is limited by set
@@ -1041,42 +1086,72 @@ func ExtractMsgDetails(msg *dns.Msg) (qname string, responseIPs []net.IP, TTL ui
 	return qname, responseIPs, TTL, CNAMEs, msg.Rcode, answerTypes, qTypes, nil
 }
 
-// bindToAddr attempts to bind to address and port for both UDP and TCP. If
-// port is 0 a random open port is assigned and the same one is used for UDP
-// and TCP.
+// bindToAddr attempts to bind to address and port for both UDP and TCP on IPv4 and/or IPv6.
+// If address is empty it automatically binds to the loopback interfaces on IPv4 and/or IPv6.
+// If port is 0 a random open port is assigned and the same one is used for UDP and TCP.
 // Note: This mimics what the dns package does EXCEPT for setting reuseport.
 // This is ok for now but it would simplify proxy management in the future to
 // have it set.
-func bindToAddr(address string, port uint16, ipv4, ipv6 bool) (*net.UDPConn, *net.TCPListener, error) {
-	var err error
-	var listener net.Listener
-	var conn net.PacketConn
+func bindToAddr(address string, port uint16, handler dns.Handler, ipv4, ipv6 bool) (dnsServers []*dns.Server, bindPort uint16, err error) {
 	defer func() {
 		if err != nil {
-			if listener != nil {
-				listener.Close()
-			}
-			if conn != nil {
-				conn.Close()
-			}
+			shutdownServers(dnsServers)
 		}
 	}()
 
-	bindAddr := net.JoinHostPort(address, strconv.Itoa(int(port)))
+	// Global singleton sessionUDPFactory which is used for IPv4 & IPv6
+	sessUdpFactory := &sessionUDPFactory{ipv4Enabled: ipv4, ipv6Enabled: ipv6}
 
-	listener, err = listenConfig(linux_defaults.MagicMarkEgress, ipv4, ipv6).Listen(context.Background(),
-		"tcp", bindAddr)
-	if err != nil {
-		return nil, nil, err
+	var ipFamilies []ipFamily
+	if ipv4 {
+		ipFamilies = append(ipFamilies, ipv4Family())
+	}
+	if ipv6 {
+		ipFamilies = append(ipFamilies, ipv6Family())
 	}
 
-	conn, err = listenConfig(linux_defaults.MagicMarkEgress, ipv4, ipv6).ListenPacket(context.Background(),
-		"udp", listener.Addr().String())
-	if err != nil {
-		return nil, nil, err
+	for _, ipf := range ipFamilies {
+		lc := listenConfig(linux_defaults.MagicMarkEgress, ipf.IPv4Enabled, ipf.IPv6Enabled)
+
+		tcpListener, err := lc.Listen(context.Background(), ipf.TCPAddress, evaluateAddress(address, port, bindPort, ipf))
+		if err != nil {
+			return nil, 0, fmt.Errorf("failed to listen on %s: %w", ipf.TCPAddress, err)
+		}
+		dnsServers = append(dnsServers, &dns.Server{
+			Listener: tcpListener, Handler: handler,
+			// Net & Addr are only set for logging purposes and aren't used if using ActivateAndServe.
+			Net: ipf.TCPAddress, Addr: tcpListener.Addr().String(),
+		})
+
+		bindPort = uint16(tcpListener.Addr().(*net.TCPAddr).Port)
+
+		udpConn, err := lc.ListenPacket(context.Background(), ipf.UDPAddress, evaluateAddress(address, port, bindPort, ipf))
+		if err != nil {
+			return nil, 0, fmt.Errorf("failed to listen on %s: %w", ipf.UDPAddress, err)
+		}
+		dnsServers = append(dnsServers, &dns.Server{
+			PacketConn: udpConn, Handler: handler, SessionUDPFactory: sessUdpFactory,
+			// Net & Addr are only set for logging purposes and aren't used if using ActivateAndServe.
+			Net: ipf.UDPAddress, Addr: udpConn.LocalAddr().String(),
+		})
 	}
 
-	return conn.(*net.UDPConn), listener.(*net.TCPListener), nil
+	return dnsServers, bindPort, nil
+}
+
+func evaluateAddress(address string, port uint16, bindPort uint16, ipFamily ipFamily) string {
+	addr := ipFamily.Localhost
+
+	if address != "" {
+		addr = address
+	}
+
+	if bindPort == 0 {
+		return net.JoinHostPort(addr, strconv.Itoa(int(port)))
+	} else {
+		// Already bound to a port by a previous server -> reuse same port
+		return net.JoinHostPort(addr, strconv.Itoa(int(bindPort)))
+	}
 }
 
 // shouldCompressResponse returns true when the response needs to be compressed

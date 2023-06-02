@@ -7,8 +7,11 @@ import (
 	"context"
 	"testing"
 
+	check "github.com/cilium/checkmate"
 	cniTypesVer "github.com/containernetworking/cni/pkg/types/100"
-	"gopkg.in/check.v1"
+
+	"github.com/cilium/cilium/pkg/client"
+	"github.com/cilium/cilium/plugins/cilium-cni/lib"
 )
 
 func Test(t *testing.T) {
@@ -21,23 +24,15 @@ var _ = check.Suite(&APISuite{})
 
 type pluginTest struct{}
 
-func (p *pluginTest) Add(ctx context.Context, pluginContext PluginContext) (res *cniTypesVer.Result, err error) {
+func (p *pluginTest) Add(ctx context.Context, pluginContext PluginContext, cli *client.Client) (res *cniTypesVer.Result, err error) {
 	return nil, nil
 }
 
-func (p *pluginTest) ImplementsAdd() bool {
-	return true
-}
-
-func (p *pluginTest) Delete(ctx context.Context, pluginContext PluginContext) (err error) {
+func (p *pluginTest) Delete(ctx context.Context, pluginContext PluginContext, delClient *lib.DeletionFallbackClient) (err error) {
 	return nil
 }
 
-func (p *pluginTest) ImplementsDelete() bool {
-	return true
-}
-
-func (p *pluginTest) Check(ctx context.Context, pluginContext PluginContext) error {
+func (p *pluginTest) Check(ctx context.Context, pluginContext PluginContext, cli *client.Client) error {
 	return nil
 }
 

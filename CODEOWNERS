@@ -46,6 +46,9 @@
 #   code owner is not expected to validate the technical correctness of
 #   submissions. Correctness is typically handled by another code owner group
 #   which is also assigned to any given piece of documentation.
+# - @cilium/sig-foundations:
+#   Review changes to the core libraries and provide guidance to overall
+#   software architecture.
 # - @cilium/github-sec:
 #   Responsible for maintaining the security of repositories in the Cilium
 #   project by maintaining best practices for workflow usage, for instance
@@ -65,6 +68,9 @@
 #   Provide recommendations about the types, names and labels for metrics to
 #   follow best practices. This includes considering the cardinality impact of
 #   metrics being added or extended.
+# - @cilium/security:
+#   Provide feedback on changes that could have security implications for Cilium,
+#   and maintain security-related documentation.
 # - @cilium/tophat:
 #   Top Hat duties rotate between the committer group from week to week, and
 #   they may assist in maintenance, triage and backporting duties across
@@ -218,7 +224,7 @@
 /.gitattributes @cilium/tophat
 /.github/ @cilium/contributing
 /.github/workflows/ @cilium/github-sec @cilium/ci-structure
-/.github/workflows/conformance-datapath.yaml @cilium/sig-datapath @cilium/github-sec @cilium/ci-structure
+/.github/workflows/*datapath*.yaml @cilium/sig-datapath @cilium/github-sec @cilium/ci-structure
 /.gitignore @cilium/tophat
 /.golangci.yaml @cilium/ci-structure
 /.mailmap @cilium/tophat
@@ -242,7 +248,6 @@ Makefile* @cilium/build
 /bpf/init.sh @cilium/loader
 /bpf/custom/Makefile* @cilium/build @cilium/loader
 /bpf/lib/encrypt.h @cilium/ipsec
-/bpf/sockops/Makefile* @cilium/build @cilium/loader
 /bugtool/ @cilium/tophat
 /bugtool/cmd/ @cilium/cli
 /cilium/ @cilium/cli
@@ -252,7 +257,6 @@ Makefile* @cilium/build
 /cilium-health/cmd/ @cilium/sig-agent @cilium/cli
 /clustermesh-apiserver @cilium/sig-clustermesh
 /contrib/ @cilium/contributing
-/contrib/packaging/ @cilium/build
 /contrib/vagrant/ @cilium/contributing
 /contrib/coccinelle/ @cilium/sig-datapath
 /daemon/ @cilium/sig-agent
@@ -268,7 +272,7 @@ Makefile* @cilium/build
 /daemon/cmd/prefilter.go @cilium/sig-datapath
 /daemon/cmd/proxy.go @cilium/proxy
 /daemon/cmd/state.go @cilium/endpoint
-/daemon/cmd/sysctl* @cilium/sig-datapath
+/daemon/cmd/cells*.go @cilium/sig-foundations
 /Documentation/ @cilium/docs-structure
 /Documentation/_static/ @cilium/docs-structure
 /Documentation/api.rst @cilium/sig-agent @cilium/docs-structure
@@ -327,10 +331,12 @@ Makefile* @cilium/build
 /Documentation/overview/intro.rst @cilium/docs-structure
 /Documentation/requirements.txt @cilium/docs-structure
 /Documentation/security/http.rst @cilium/sig-policy @cilium/docs-structure
+/Documentation/security/images/cilium_threat_model* @cilium/security @cilium/docs-structure
 /Documentation/security/network/encryption-ipsec.rst @cilium/ipsec @cilium/docs-structure
 /Documentation/security/network/proxy/ @cilium/proxy @cilium/docs-structure
 /Documentation/security/policy-creation.rst @cilium/sig-policy @cilium/docs-structure
 /Documentation/security/policy/ @cilium/sig-policy @cilium/docs-structure
+/Documentation/security/threat-model.rst @cilium/security @cilium/docs-structure
 /Documentation/spelling_wordlist.txt @cilium/docs-structure
 /Documentation/update-cmdref.sh @cilium/docs-structure
 /Documentation/update-spelling_wordlist.sh @cilium/docs-structure
@@ -344,7 +350,6 @@ Makefile* @cilium/build
 /examples/policies/kubernetes/clustermesh/ @cilium/sig-clustermesh
 /FURTHER_READINGS.rst @cilium/docs-structure
 /hack/ @cilium/tophat
-/GO_VERSION @cilium/sig-agent
 *.Jenkinsfile @cilium/ci-structure
 /hubble-relay/ @cilium/sig-hubble
 /images @cilium/build
@@ -378,7 +383,7 @@ jenkinsfiles @cilium/ci-structure
 /pkg/bandwidth/ @cilium/sig-datapath
 /pkg/bgp/ @cilium/sig-bgp
 /pkg/bgpv1/ @cilium/sig-bgp
-/pkg/bpf/ @cilium/sig-datapath
+/pkg/bpf/ @cilium/loader
 /pkg/byteorder/ @cilium/sig-datapath @cilium/api
 /pkg/cgroups/ @cilium/sig-datapath
 /pkg/checker/ @cilium/ci-structure
@@ -399,7 +404,7 @@ jenkinsfiles @cilium/ci-structure
 /pkg/datapath/linux/node.go @cilium/ipsec @cilium/sig-datapath
 /pkg/datapath/linux/probes/ @cilium/loader
 /pkg/datapath/linux/requirements.go @cilium/loader
-/pkg/datapath/loader.go @cilium/loader
+/pkg/datapath/types/loader.go @cilium/loader
 /pkg/datapath/loader/ @cilium/loader
 /pkg/datapath/ipcache/ @cilium/ipcache
 /pkg/defaults @cilium/sig-agent
@@ -413,7 +418,7 @@ jenkinsfiles @cilium/ci-structure
 /pkg/fqdn/ @cilium/sig-agent @cilium/proxy
 /pkg/fswatcher/ @cilium/sig-datapath @cilium/sig-hubble
 /pkg/health/ @cilium/sig-agent
-/pkg/hive/ @cilium/sig-agent
+/pkg/hive/ @cilium/sig-foundations
 /pkg/hubble/ @cilium/sig-hubble
 /pkg/hubble/metrics @cilium/sig-hubble @cilium/sig-hubble-api
 /pkg/identity @cilium/sig-policy
@@ -426,11 +431,15 @@ jenkinsfiles @cilium/ci-structure
 /pkg/ipcache/ @cilium/ipcache
 /pkg/ipmasq @cilium/sig-agent
 /pkg/k8s/ @cilium/sig-k8s
+/pkg/k8s/watchers/cilium_network_policy.go @cilium/sig-policy
+/pkg/k8s/watchers/cilium_cidr_group.go @cilium/sig-policy
+/pkg/k8s/watchers/cilium_cidr_group_test.go @cilium/sig-policy
 /pkg/k8s/apis/cilium.io/client/crds/v2/ @cilium/sig-k8s
 /pkg/k8s/apis/cilium.io/v2/ @cilium/api @cilium/sig-k8s
 /pkg/kafka/ @cilium/proxy
 /pkg/kvstore/ @cilium/kvstore
 /pkg/labels @cilium/sig-policy @cilium/api
+/pkg/labelsfilter @cilium/sig-policy
 /pkg/launcher @cilium/sig-agent
 /pkg/loadbalancer @cilium/sig-lb
 /pkg/lock @cilium/sig-agent
@@ -456,14 +465,19 @@ jenkinsfiles @cilium/ci-structure
 /pkg/policy @cilium/sig-policy
 /pkg/policy/api/ @cilium/api
 /pkg/policy/groups/aws/ @cilium/sig-policy @cilium/aws
+/pkg/promise @cilium/sig-foundations
 /pkg/proxy/ @cilium/proxy
 /pkg/proxy/accesslog @cilium/api
+/pkg/recorder @cilium/sig-datapath
 /pkg/redirectpolicy @cilium/sig-lb
 /pkg/safeio @cilium/sig-agent
 /pkg/serializer @cilium/sig-agent
 /pkg/service @cilium/sig-lb
-/pkg/sockops/ @cilium/sig-datapath @cilium/loader
+/pkg/slices @cilium/sig-foundations
+/pkg/source @cilium/ipcache
 /pkg/status/ @cilium/sig-agent
+/pkg/statedb @cilium/sig-foundations
+/pkg/stream @cilium/sig-foundations
 /pkg/sysctl @cilium/sig-datapath
 /pkg/testutils/ @cilium/ci-structure
 /pkg/tuple @cilium/sig-datapath
@@ -481,16 +495,12 @@ jenkinsfiles @cilium/ci-structure
 /test/Makefile* @cilium/ci-structure @cilium/build
 # Service handling tests
 /test/k8s/services.go @cilium/sig-lb @cilium/ci-structure
-/test/runtime/lb.go @cilium/sig-lb @cilium/ci-structure
 # Datapath tests
 /test/bpf/ @cilium/sig-datapath
-/test/bpf/check-complexity.sh @cilium/loader
-/test/bpf/verifier-test.sh @cilium/loader
 /test/bpf_tests/ @cilium/sig-datapath
 /test/k8s/bandwidth.go @cilium/sig-datapath @cilium/ci-structure
 /test/k8s/chaos.go @cilium/sig-datapath @cilium/ci-structure
 /test/k8s/datapath_configuration.go @cilium/sig-datapath @cilium/ci-structure
-/test/k8s/verifier.go @cilium/loader @cilium/ci-structure
 /test/runtime/connectivity.go @cilium/sig-datapath @cilium/ci-structure
 /test/verifier @cilium/loader @cilium/ci-structure
 # Policy tests
@@ -510,8 +520,6 @@ jenkinsfiles @cilium/ci-structure
 # BGP tests
 /test/k8s/bgp.go @cilium/sig-bgp @cilium/ci-structure
 # Misc. tests
-/test/k8s/cli.go @cilium/cli @cilium/ci-structure
-/test/k8s/health.go @cilium/sig-agent @cilium/ci-structure
 /test/k8s/updates.go @cilium/sig-agent @cilium/ci-structure
 /test/runtime/kvstore.go @cilium/kvstore @cilium/ci-structure
 /test/runtime/chaos_agent.go @cilium/sig-agent @cilium/ci-structure
@@ -525,3 +533,4 @@ Vagrantfile @cilium/ci-structure
 /vagrant_box_defaults.rb @cilium/ci-structure
 /vendor/ @cilium/vendor
 /VERSION @cilium/tophat
+/.clang-format @cilium/contributing

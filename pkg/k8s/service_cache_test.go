@@ -4,12 +4,12 @@
 package k8s
 
 import (
+	"fmt"
 	"net"
 	"time"
 
-	"gopkg.in/check.v1"
+	check "github.com/cilium/checkmate"
 	v1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/cilium/cilium/pkg/checker"
 	cmtypes "github.com/cilium/cilium/pkg/clustermesh/types"
@@ -216,7 +216,7 @@ func testServiceCache(c *check.C,
 	}
 
 	swgEps := lock.NewStoppableWaitGroup()
-	updateEndpointsCB(&svcCache, swgEps)
+	updateEndpointsCB(svcCache, swgEps)
 
 	// The service should be ready as both service and endpoints have been
 	// imported
@@ -262,7 +262,7 @@ func testServiceCache(c *check.C,
 	}, 2*time.Second), check.IsNil)
 
 	// Deleting the endpoints will result in a service update event
-	deleteEndpointsCB(&svcCache, swgEps)
+	deleteEndpointsCB(svcCache, swgEps)
 	c.Assert(testutils.WaitUntil(func() bool {
 		event := <-svcCache.Events
 		defer event.SWG.Done()
@@ -276,7 +276,7 @@ func testServiceCache(c *check.C,
 	c.Assert(endpoints.String(), check.Equals, "")
 
 	// Reinserting the endpoints should re-match with the still existing service
-	updateEndpointsCB(&svcCache, swgEps)
+	updateEndpointsCB(svcCache, swgEps)
 	c.Assert(testutils.WaitUntil(func() bool {
 		event := <-svcCache.Events
 		defer event.SWG.Done()
@@ -301,7 +301,7 @@ func testServiceCache(c *check.C,
 
 	// Deleting the endpoints will not emit an event as the notification
 	// was sent out when the service was deleted.
-	deleteEndpointsCB(&svcCache, swgEps)
+	deleteEndpointsCB(svcCache, swgEps)
 	time.Sleep(100 * time.Millisecond)
 	select {
 	case <-svcCache.Events:
@@ -325,6 +325,29 @@ func testServiceCache(c *check.C,
 func (s *K8sSuite) TestCacheActionString(c *check.C) {
 	c.Assert(UpdateService.String(), check.Equals, "service-updated")
 	c.Assert(DeleteService.String(), check.Equals, "service-deleted")
+}
+
+func (s *K8sSuite) TestServiceMutators(c *check.C) {
+	var m1, m2 int
+
+	svcCache := NewServiceCache(fakeDatapath.NewNodeAddressing())
+	svcCache.ServiceMutators = append(svcCache.ServiceMutators,
+		func(svc *slim_corev1.Service, svcInfo *Service) { m1++ },
+		func(svc *slim_corev1.Service, svcInfo *Service) { m2++ },
+	)
+	swg := lock.NewStoppableWaitGroup()
+	svcCache.UpdateService(&slim_corev1.Service{
+		ObjectMeta: slim_metav1.ObjectMeta{Name: "foo", Namespace: "bar"},
+		Spec: slim_corev1.ServiceSpec{
+			ClusterIP: "127.0.0.1",
+			Selector:  map[string]string{"foo": "bar"},
+			Type:      slim_corev1.ServiceTypeClusterIP,
+		},
+	}, swg)
+
+	// Assert that the service mutators configured have been executed.
+	c.Assert(m1, check.Equals, 1)
+	c.Assert(m2, check.Equals, 1)
 }
 
 func (s *K8sSuite) TestExternalServiceMerging(c *check.C) {
@@ -483,42 +506,9 @@ func (s *K8sSuite) TestExternalServiceMerging(c *check.C) {
 		return true
 	}, 2*time.Second), check.IsNil)
 
-	svcCache.MergeExternalServiceUpdate(&serviceStore.ClusterService{
-		Cluster:   "cluster1",
-		Namespace: "bar",
-		Name:      "foo",
-		Frontends: map[string]serviceStore.PortConfiguration{
-			"1.1.1.1": {},
-		},
-		Backends: map[string]serviceStore.PortConfiguration{
-			"3.3.3.3": map[string]*loadbalancer.L4Addr{
-				"port": {Protocol: loadbalancer.TCP, Port: 80},
-			},
-		},
-		IncludeExternal: false,
-		Shared:          true,
-	},
-		swgSvcs,
-	)
-
-	// Adding shared remote endpoints will not trigger a service update, in case IncludeExternal
-	// is not set (i.e., the service is not marked as a global one in the remote cluster).
-	// Nonetheless, this condition should never happen, since a shared service shall always be global.
-	c.Assert(testutils.WaitUntil(func() bool {
-		event := <-svcCache.Events
-		defer event.SWG.Done()
-		c.Assert(event.Action, check.Equals, UpdateService)
-		c.Assert(event.ID, check.Equals, svcID)
-
-		c.Assert(len(event.Endpoints.Backends), checker.Equals, 1)
-		c.Assert(event.Endpoints.Backends[cmtypes.MustParseAddrCluster("2.2.2.2")], checker.DeepEquals, &Backend{
-			Ports: serviceStore.PortConfiguration{
-				"http-test-svc": {Protocol: loadbalancer.TCP, Port: 8080},
-			},
-		})
-
-		return true
-	}, 2*time.Second), check.IsNil)
+	// We do not test the case with shared remote endpoints and IncludeExternal not set
+	// (i.e., the service is not marked as a global one in the remote cluster).
+	// Indeed, this condition shall never happen, since a shared service shall always be global.
 
 	svcCache.MergeExternalServiceUpdate(&serviceStore.ClusterService{
 		Cluster:   "cluster1",
@@ -699,6 +689,85 @@ func (s *K8sSuite) TestExternalServiceMerging(c *check.C) {
 	swgEps.Stop()
 	c.Assert(testutils.WaitUntil(func() bool {
 		swgEps.Wait()
+		return true
+	}, 2*time.Second), check.IsNil)
+}
+
+func (s *K8sSuite) TestExternalServiceDeletion(c *check.C) {
+	const cluster = "cluster"
+
+	createEndpoints := func(clusters ...string) externalEndpoints {
+		eeps := newExternalEndpoints()
+		for i, cluster := range clusters {
+			eps := newEndpoints()
+			eps.Backends[cmtypes.MustParseAddrCluster(fmt.Sprintf("1.1.1.%d", i))] = &Backend{}
+			eeps.endpoints[cluster] = eps
+		}
+
+		return eeps
+	}
+
+	svc := Service{IncludeExternal: true, Shared: true}
+	clsvc := serviceStore.ClusterService{Cluster: cluster, Namespace: "bar", Name: "foo"}
+	id1 := ServiceID{Namespace: "bar", Name: "foo"}
+	id2 := ServiceID{Cluster: cluster, Namespace: "bar", Name: "foo"}
+
+	swg := lock.NewStoppableWaitGroup()
+	svcCache := NewServiceCache(fakeDatapath.NewNodeAddressing())
+
+	// Store the service with the non-cluster-aware ID
+	svcCache.services[id1] = &svc
+	svcCache.externalEndpoints[id1] = createEndpoints(cluster)
+
+	svcCache.MergeExternalServiceDelete(&clsvc, swg)
+	_, ok := svcCache.services[id1]
+	c.Assert(ok, check.Equals, false)
+	_, ok = svcCache.externalEndpoints[id1]
+	c.Assert(ok, check.Equals, false)
+
+	c.Assert(testutils.WaitUntil(func() bool {
+		event := <-svcCache.Events
+		defer event.SWG.Done()
+		c.Assert(event.Action, check.Equals, DeleteService)
+		c.Assert(event.ID, check.Equals, id1)
+		return true
+	}, 2*time.Second), check.IsNil)
+
+	// Store the service with the non-cluster-aware ID and multiple endpoints
+	svcCache.services[id1] = &svc
+	svcCache.externalEndpoints[id1] = createEndpoints(cluster, "other")
+
+	svcCache.MergeExternalServiceDelete(&clsvc, swg)
+	_, ok = svcCache.services[id1]
+	c.Assert(ok, check.Equals, true)
+	_, ok = svcCache.externalEndpoints[id1]
+	c.Assert(ok, check.Equals, true)
+	_, ok = svcCache.externalEndpoints[id1].endpoints[cluster]
+	c.Assert(ok, check.Equals, false)
+
+	c.Assert(testutils.WaitUntil(func() bool {
+		event := <-svcCache.Events
+		defer event.SWG.Done()
+		c.Assert(event.Action, check.Equals, UpdateService)
+		c.Assert(event.ID, check.Equals, id1)
+		return true
+	}, 2*time.Second), check.IsNil)
+
+	// Store the service with the cluster-aware ID
+	svcCache.services[id2] = &svc
+	svcCache.externalEndpoints[id2] = createEndpoints(cluster)
+
+	svcCache.MergeExternalServiceDelete(&clsvc, swg)
+	_, ok = svcCache.services[id2]
+	c.Assert(ok, check.Equals, false)
+	_, ok = svcCache.externalEndpoints[id2]
+	c.Assert(ok, check.Equals, false)
+
+	c.Assert(testutils.WaitUntil(func() bool {
+		event := <-svcCache.Events
+		defer event.SWG.Done()
+		c.Assert(event.Action, check.Equals, DeleteService)
+		c.Assert(event.ID, check.Equals, id2)
 		return true
 	}, 2*time.Second), check.IsNil)
 }
@@ -1061,6 +1130,223 @@ func (s *K8sSuite) TestServiceCacheWith2EndpointSlice(c *check.C) {
 	}, 2*time.Second), check.IsNil)
 }
 
+func (s *K8sSuite) TestServiceCacheWith2EndpointSliceSameAddress(c *check.C) {
+	k8sEndpointSlice1 := &slim_discovery_v1.EndpointSlice{
+		AddressType: slim_discovery_v1.AddressTypeIPv4,
+		ObjectMeta: slim_metav1.ObjectMeta{
+			Name:      "foo-yyyyy",
+			Namespace: "bar",
+			Labels: map[string]string{
+				slim_discovery_v1.LabelServiceName: "foo",
+			},
+		},
+		Endpoints: []slim_discovery_v1.Endpoint{
+			{
+				Addresses: []string{
+					"2.2.2.2",
+				},
+			},
+		},
+		Ports: []slim_discovery_v1.EndpointPort{
+			{
+				Name:     func() *string { a := "http-test-svc"; return &a }(),
+				Protocol: func() *slim_corev1.Protocol { a := slim_corev1.ProtocolTCP; return &a }(),
+				Port:     func() *int32 { a := int32(8080); return &a }(),
+			},
+		},
+	}
+
+	k8sEndpointSlice2 := &slim_discovery_v1.EndpointSlice{
+		AddressType: slim_discovery_v1.AddressTypeIPv4,
+		ObjectMeta: slim_metav1.ObjectMeta{
+			Name:      "foo-xxxxx",
+			Namespace: "bar",
+			Labels: map[string]string{
+				slim_discovery_v1.LabelServiceName: "foo",
+			},
+		},
+		Endpoints: []slim_discovery_v1.Endpoint{
+			{
+				Addresses: []string{
+					"2.2.2.2",
+				},
+			},
+		},
+		Ports: []slim_discovery_v1.EndpointPort{
+			{
+				Name:     func() *string { a := "http-test-svc2"; return &a }(),
+				Protocol: func() *slim_corev1.Protocol { a := slim_corev1.ProtocolTCP; return &a }(),
+				Port:     func() *int32 { a := int32(8081); return &a }(),
+			},
+		},
+	}
+
+	svcCache := NewServiceCache(fakeDatapath.NewNodeAddressing())
+
+	k8sSvc := &slim_corev1.Service{
+		ObjectMeta: slim_metav1.ObjectMeta{
+			Name:      "foo",
+			Namespace: "bar",
+			Labels: map[string]string{
+				"foo": "bar",
+			},
+		},
+		Spec: slim_corev1.ServiceSpec{
+			ClusterIP: "127.0.0.1",
+			Selector: map[string]string{
+				"foo": "bar",
+			},
+			Type: slim_corev1.ServiceTypeClusterIP,
+		},
+	}
+
+	swgSvcs := lock.NewStoppableWaitGroup()
+	svcID := svcCache.UpdateService(k8sSvc, swgSvcs)
+
+	time.Sleep(100 * time.Millisecond)
+
+	select {
+	case <-svcCache.Events:
+		c.Error("Unexpected service event received before endpoints have been imported")
+	default:
+	}
+
+	swgEps := lock.NewStoppableWaitGroup()
+	svcCache.UpdateEndpointSlicesV1(k8sEndpointSlice1, swgEps)
+	svcCache.UpdateEndpointSlicesV1(k8sEndpointSlice2, swgEps)
+
+	// The service should be ready as both service and endpoints have been
+	// imported for k8sEndpointSlice1
+	c.Assert(testutils.WaitUntil(func() bool {
+		event := <-svcCache.Events
+		defer event.SWG.Done()
+		c.Assert(event.Action, check.Equals, UpdateService)
+		c.Assert(event.ID, check.Equals, svcID)
+		return true
+	}, 2*time.Second), check.IsNil)
+
+	// The service should be ready as both service and endpoints have been
+	// imported for k8sEndpointSlice2
+	c.Assert(testutils.WaitUntil(func() bool {
+		event := <-svcCache.Events
+		defer event.SWG.Done()
+		c.Assert(event.Action, check.Equals, UpdateService)
+		c.Assert(event.ID, check.Equals, svcID)
+		return true
+	}, 2*time.Second), check.IsNil)
+
+	select {
+	case <-svcCache.Events:
+		c.Error("Unexpected service event received when endpoints not selected by a service have been imported")
+	default:
+	}
+	endpoints, ready := svcCache.correlateEndpoints(svcID)
+	c.Assert(ready, check.Equals, true)
+	c.Assert(endpoints.String(), check.Equals, "2.2.2.2:8080/TCP,2.2.2.2:8081/TCP")
+
+	// Updating the service without changing it should not result in an event
+	svcCache.UpdateService(k8sSvc, swgSvcs)
+	time.Sleep(100 * time.Millisecond)
+	select {
+	case <-svcCache.Events:
+		c.Error("Unexpected service event received for unchanged service object")
+	default:
+	}
+
+	// Deleting the service will result in a service delete event
+	svcCache.DeleteService(k8sSvc, swgSvcs)
+	c.Assert(testutils.WaitUntil(func() bool {
+		event := <-svcCache.Events
+		defer event.SWG.Done()
+		c.Assert(event.Action, check.Equals, DeleteService)
+		c.Assert(event.ID, check.Equals, svcID)
+		return true
+	}, 2*time.Second), check.IsNil)
+
+	// Reinserting the service should re-match with the still existing endpoints
+	svcCache.UpdateService(k8sSvc, swgSvcs)
+	c.Assert(testutils.WaitUntil(func() bool {
+		event := <-svcCache.Events
+		defer event.SWG.Done()
+		c.Assert(event.Action, check.Equals, UpdateService)
+		c.Assert(event.ID, check.Equals, svcID)
+		return true
+	}, 2*time.Second), check.IsNil)
+
+	// Deleting the k8sEndpointSlice2 will result in a service update event
+	svcCache.DeleteEndpointSlices(k8sEndpointSlice2, swgEps)
+	c.Assert(testutils.WaitUntil(func() bool {
+		event := <-svcCache.Events
+		defer event.SWG.Done()
+		c.Assert(event.Action, check.Equals, UpdateService)
+		c.Assert(event.ID, check.Equals, svcID)
+		return true
+	}, 2*time.Second), check.IsNil)
+
+	endpoints, ready = svcCache.correlateEndpoints(svcID)
+	c.Assert(ready, check.Equals, true)
+	c.Assert(endpoints.String(), check.Equals, "2.2.2.2:8080/TCP")
+
+	svcCache.DeleteEndpointSlices(k8sEndpointSlice1, swgEps)
+	c.Assert(testutils.WaitUntil(func() bool {
+		event := <-svcCache.Events
+		defer event.SWG.Done()
+		c.Assert(event.Action, check.Equals, UpdateService)
+		c.Assert(event.ID, check.Equals, svcID)
+		return true
+	}, 2*time.Second), check.IsNil)
+
+	endpoints, serviceReady := svcCache.correlateEndpoints(svcID)
+	c.Assert(serviceReady, check.Equals, false)
+	c.Assert(endpoints.String(), check.Equals, "")
+
+	// Reinserting the endpoints should re-match with the still existing service
+	svcCache.UpdateEndpointSlicesV1(k8sEndpointSlice1, swgEps)
+	c.Assert(testutils.WaitUntil(func() bool {
+		event := <-svcCache.Events
+		defer event.SWG.Done()
+		c.Assert(event.Action, check.Equals, UpdateService)
+		c.Assert(event.ID, check.Equals, svcID)
+		return true
+	}, 2*time.Second), check.IsNil)
+
+	endpoints, serviceReady = svcCache.correlateEndpoints(svcID)
+	c.Assert(serviceReady, check.Equals, true)
+	c.Assert(endpoints.String(), check.Equals, "2.2.2.2:8080/TCP")
+
+	// Deleting the service will result in a service delete event
+	svcCache.DeleteService(k8sSvc, swgSvcs)
+	c.Assert(testutils.WaitUntil(func() bool {
+		event := <-svcCache.Events
+		defer event.SWG.Done()
+		c.Assert(event.Action, check.Equals, DeleteService)
+		c.Assert(event.ID, check.Equals, svcID)
+		return true
+	}, 2*time.Second), check.IsNil)
+
+	// Deleting the endpoints will not emit an event as the notification
+	// was sent out when the service was deleted.
+	svcCache.DeleteEndpointSlices(k8sEndpointSlice1, swgEps)
+	time.Sleep(100 * time.Millisecond)
+	select {
+	case <-svcCache.Events:
+		c.Error("Unexpected service delete event received")
+	default:
+	}
+
+	swgSvcs.Stop()
+	c.Assert(testutils.WaitUntil(func() bool {
+		swgSvcs.Wait()
+		return true
+	}, 2*time.Second), check.IsNil)
+
+	swgEps.Stop()
+	c.Assert(testutils.WaitUntil(func() bool {
+		swgEps.Wait()
+		return true
+	}, 2*time.Second), check.IsNil)
+}
+
 func (s *K8sSuite) TestServiceEndpointFiltering(c *check.C) {
 	k8sSvc := &slim_corev1.Service{
 		ObjectMeta: slim_metav1.ObjectMeta{
@@ -1104,8 +1390,8 @@ func (s *K8sSuite) TestServiceEndpointFiltering(c *check.C) {
 			},
 		},
 	}
-	k8sNode := &v1.Node{
-		ObjectMeta: metav1.ObjectMeta{
+	k8sNode := &slim_corev1.Node{
+		ObjectMeta: slim_metav1.ObjectMeta{
 			Name:   "node1",
 			Labels: map[string]string{v1.LabelTopologyZone: "test-zone-2"},
 		},

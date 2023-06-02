@@ -8,6 +8,7 @@ import (
 	"net"
 	"sync"
 
+	"github.com/sirupsen/logrus"
 	"k8s.io/client-go/tools/cache"
 
 	"github.com/cilium/cilium/pkg/identity"
@@ -20,6 +21,7 @@ import (
 	"github.com/cilium/cilium/pkg/k8s/utils"
 	"github.com/cilium/cilium/pkg/k8s/watchers/resources"
 	"github.com/cilium/cilium/pkg/kvstore"
+	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/node"
 	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/source"
@@ -173,6 +175,17 @@ func (k *K8sWatcher) endpointUpdated(oldEndpoint, endpoint *types.CiliumEndpoint
 		return
 	}
 
+	if option.Config.EnableHighScaleIPcache &&
+		!identity.IsWellKnownIdentity(id) {
+		// Well-known identities are kept in the high-scale ipcache because we
+		// need to be able to connect to the DNS pods to resolve FQDN policies.
+		scopedLog := log.WithFields(logrus.Fields{
+			logfields.Identity: id,
+		})
+		scopedLog.Debug("Endpoint is not well-known; skipping ipcache upsert")
+		return
+	}
+
 	k8sMeta := &ipcache.K8sMetadata{
 		Namespace:  endpoint.Namespace,
 		PodName:    endpoint.Name,
@@ -209,7 +222,7 @@ func (k *K8sWatcher) endpointUpdated(oldEndpoint, endpoint *types.CiliumEndpoint
 		}
 	}
 
-	if option.Config.EnableIPv4EgressGateway {
+	if k.egressGatewayManager != nil {
 		k.egressGatewayManager.OnUpdateEndpoint(endpoint)
 	}
 }
@@ -236,7 +249,7 @@ func (k *K8sWatcher) endpointDeleted(endpoint *types.CiliumEndpoint) {
 			k.policyManager.TriggerPolicyUpdates(true, "Named ports deleted")
 		}
 	}
-	if option.Config.EnableIPv4EgressGateway {
+	if k.egressGatewayManager != nil {
 		k.egressGatewayManager.OnDeleteEndpoint(endpoint)
 	}
 }

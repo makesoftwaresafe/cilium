@@ -27,8 +27,8 @@ jobs:
     environment: release-base-images
     runs-on: ubuntu-20.04
     steps:
-      - name: Checkout master branch to access local actions
-        uses: actions/checkout@ac593985615ec2ede58e132d2e21d2b1cbd6127c # v3.3.0
+      - name: Checkout main branch to access local actions
+        uses: actions/checkout@8e5e7e5ab8b370d6c329ec480221332ada57f0ab # v3.5.2
         with:
           ref: ${{ github.event.repository.default_branch }}
           persist-credentials: false
@@ -37,17 +37,17 @@ jobs:
         uses: ./.github/actions/set-env-variables
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@f03ac48505955848960e80bbb68046aa35c7b9e7 # v2.4.1
+        uses: docker/setup-buildx-action@4b4e9c3e2d4531116a6f8ba8e71fc6e2cb6e6c8c # v2.5.0
 
       - name: Set up QEMU
         id: qemu
         uses: docker/setup-qemu-action@e81a89b1732b9c48d79cd809d8d81d79c4647a18 # v2.1.0
 
       - name: Install Cosign
-        uses: sigstore/cosign-installer@9becc617647dfa20ae7b1151972e9b3a2c338a2b # v2.8.1
+        uses: sigstore/cosign-installer@dd6b2e2b610a11fd73dd187a43d57cc1394e35f9 # v3.0.5
 
       - name: Checkout Source Code
-        uses: actions/checkout@ac593985615ec2ede58e132d2e21d2b1cbd6127c # v3.3.0
+        uses: actions/checkout@8e5e7e5ab8b370d6c329ec480221332ada57f0ab # v3.5.2
         with:
           persist-credentials: false
           ref: ${{ github.event.pull_request.head.sha }}
@@ -95,15 +95,16 @@ jobs:
 
       - name: Sign Container Image Runtime
         if: ${{ steps.cilium-runtime-tag-in-repositories.outputs.exists == 'false' }}
-        env:
-          COSIGN_EXPERIMENTAL: "true"
         run: |
-          cosign sign quay.io/${{ env.QUAY_ORGANIZATION_DEV }}/cilium-runtime@${{ steps.docker_build_release_runtime.outputs.digest }}
+          cosign sign -y quay.io/${{ env.QUAY_ORGANIZATION_DEV }}/cilium-runtime@${{ steps.docker_build_release_runtime.outputs.digest }}
 
       - name: Install Bom
         shell: bash
+        env:
+          # renovate: datasource=github-releases depName=kubernetes-sigs/bom
+          BOM_VERSION: v0.5.1
         run: |
-          curl -L https://github.com/kubernetes-sigs/bom/releases/download/v0.4.1/bom-linux-amd64 -o bom
+          curl -L https://github.com/kubernetes-sigs/bom/releases/download/${{ env.BOM_VERSION }}/bom-amd64-linux -o bom
           sudo mv ./bom /usr/local/bin/bom
           sudo chmod +x /usr/local/bin/bom
 
@@ -123,13 +124,11 @@ jobs:
 
       - name: Sign SBOM Image
         if: ${{ steps.cilium-runtime-tag-in-repositories.outputs.exists == 'false' }}
-        env:
-          COSIGN_EXPERIMENTAL: "true"
         run: |
           docker_build_release_runtime_digest="${{ steps.docker_build_release_runtime.outputs.digest }}"
           image_name="quay.io/${{ env.QUAY_ORGANIZATION_DEV }}/cilium-runtime:${docker_build_release_runtime_digest/:/-}.sbom"
           docker_build_release_runtime_sbom_digest="sha256:$(docker buildx imagetools inspect --raw ${image_name} | sha256sum | head -c 64)"
-          cosign sign "quay.io/${{ env.QUAY_ORGANIZATION_DEV }}/cilium-runtime@${docker_build_release_runtime_sbom_digest}"
+          cosign sign -y "quay.io/${{ env.QUAY_ORGANIZATION_DEV }}/cilium-runtime@${docker_build_release_runtime_sbom_digest}"
 
       - name: Image Release Digest Runtime
         if: ${{ steps.cilium-runtime-tag-in-repositories.outputs.exists == 'false' }}
@@ -193,10 +192,8 @@ jobs:
 
       - name: Sign Container Image Builder
         if: ${{ steps.cilium-builder-tag-in-repositories.outputs.exists == 'false' }}
-        env:
-          COSIGN_EXPERIMENTAL: "true"
         run: |
-          cosign sign quay.io/${{ env.QUAY_ORGANIZATION_DEV }}/cilium-builder@${{ steps.docker_build_release_builder.outputs.digest }}
+          cosign sign -y quay.io/${{ env.QUAY_ORGANIZATION_DEV }}/cilium-builder@${{ steps.docker_build_release_builder.outputs.digest }}
 
       - name: Generate SBOM
         if: ${{ steps.cilium-builder-tag-in-repositories.outputs.exists == 'false' }}
@@ -214,13 +211,11 @@ jobs:
 
       - name: Sign SBOM Image
         if: ${{ steps.cilium-builder-tag-in-repositories.outputs.exists == 'false' }}
-        env:
-          COSIGN_EXPERIMENTAL: "true"
         run: |
           docker_build_release_builder_digest="${{ steps.docker_build_release_builder.outputs.digest }}"
           image_name="quay.io/${{ env.QUAY_ORGANIZATION_DEV }}/cilium-builder:${docker_build_release_builder_digest/:/-}.sbom"
           docker_build_release_builder_sbom_digest="sha256:$(docker buildx imagetools inspect --raw ${image_name} | sha256sum | head -c 64)"
-          cosign sign "quay.io/${{ env.QUAY_ORGANIZATION_DEV }}/cilium-builder@${docker_build_release_builder_sbom_digest}"
+          cosign sign -y "quay.io/${{ env.QUAY_ORGANIZATION_DEV }}/cilium-builder@${docker_build_release_builder_sbom_digest}"
 
       - name: Image Release Digest Builder
         if: ${{ steps.cilium-builder-tag-in-repositories.outputs.exists == 'false' }}

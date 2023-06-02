@@ -6,7 +6,6 @@ package cmd
 import (
 	"context"
 	"fmt"
-	"net"
 	"strings"
 	"time"
 
@@ -19,22 +18,18 @@ import (
 	. "github.com/cilium/cilium/api/v1/server/restapi/daemon"
 	"github.com/cilium/cilium/pkg/backoff"
 	"github.com/cilium/cilium/pkg/controller"
-	"github.com/cilium/cilium/pkg/datapath"
 	datapathOption "github.com/cilium/cilium/pkg/datapath/option"
+	datapath "github.com/cilium/cilium/pkg/datapath/types"
 	"github.com/cilium/cilium/pkg/identity"
 	k8smetrics "github.com/cilium/cilium/pkg/k8s/metrics"
 	"github.com/cilium/cilium/pkg/kvstore"
 	"github.com/cilium/cilium/pkg/lock"
 	"github.com/cilium/cilium/pkg/logging/logfields"
-	"github.com/cilium/cilium/pkg/maps/eppolicymap"
-	"github.com/cilium/cilium/pkg/maps/eventsmap"
 	ipcachemap "github.com/cilium/cilium/pkg/maps/ipcache"
 	ipmasqmap "github.com/cilium/cilium/pkg/maps/ipmasq"
 	"github.com/cilium/cilium/pkg/maps/lbmap"
 	"github.com/cilium/cilium/pkg/maps/lxcmap"
 	"github.com/cilium/cilium/pkg/maps/metricsmap"
-	"github.com/cilium/cilium/pkg/maps/signalmap"
-	"github.com/cilium/cilium/pkg/maps/sockmap"
 	tunnelmap "github.com/cilium/cilium/pkg/maps/tunnel"
 	"github.com/cilium/cilium/pkg/node"
 	nodeTypes "github.com/cilium/cilium/pkg/node/types"
@@ -202,7 +197,7 @@ func (d *Daemon) getClockSourceStatus() *models.ClockSource {
 }
 
 func (d *Daemon) getCNIChainingStatus() *models.CNIChainingStatus {
-	mode := option.Config.CNIChainingMode
+	mode := d.cniConfigManager.GetChainingMode()
 	if len(mode) == 0 {
 		mode = models.CNIChainingStatusModeNone
 	}
@@ -241,14 +236,15 @@ func (d *Daemon) getKubeProxyReplacementStatus() *models.KubeProxyReplacement {
 	}
 
 	features := &models.KubeProxyReplacementFeatures{
-		NodePort:            &models.KubeProxyReplacementFeaturesNodePort{},
-		HostPort:            &models.KubeProxyReplacementFeaturesHostPort{},
-		ExternalIPs:         &models.KubeProxyReplacementFeaturesExternalIPs{},
-		SocketLB:            &models.KubeProxyReplacementFeaturesSocketLB{},
-		SocketLBTracing:     &models.KubeProxyReplacementFeaturesSocketLBTracing{},
-		SessionAffinity:     &models.KubeProxyReplacementFeaturesSessionAffinity{},
-		GracefulTermination: &models.KubeProxyReplacementFeaturesGracefulTermination{},
-		Nat46X64:            &models.KubeProxyReplacementFeaturesNat46X64{},
+		NodePort:              &models.KubeProxyReplacementFeaturesNodePort{},
+		HostPort:              &models.KubeProxyReplacementFeaturesHostPort{},
+		ExternalIPs:           &models.KubeProxyReplacementFeaturesExternalIPs{},
+		SocketLB:              &models.KubeProxyReplacementFeaturesSocketLB{},
+		SocketLBTracing:       &models.KubeProxyReplacementFeaturesSocketLBTracing{},
+		SessionAffinity:       &models.KubeProxyReplacementFeaturesSessionAffinity{},
+		GracefulTermination:   &models.KubeProxyReplacementFeaturesGracefulTermination{},
+		Nat46X64:              &models.KubeProxyReplacementFeaturesNat46X64{},
+		BpfSocketLBHostnsOnly: option.Config.BPFSocketLBHostnsOnly,
 	}
 	if option.Config.EnableNodePort {
 		features.NodePort.Enabled = true
@@ -316,6 +312,10 @@ func (d *Daemon) getBPFMapStatus() *models.BPFMapStatus {
 		DynamicSizeRatio: option.Config.BPFMapsDynamicSizeRatio,
 		Maps: []*models.BPFMapProperties{
 			{
+				Name: "Auth",
+				Size: int64(option.Config.AuthMapEntries),
+			},
+			{
 				Name: "Non-TCP connection tracking",
 				Size: int64(option.Config.CTMapEntriesGlobalAny),
 			},
@@ -326,10 +326,6 @@ func (d *Daemon) getBPFMapStatus() *models.BPFMapStatus {
 			{
 				Name: "Endpoint policy",
 				Size: int64(lxcmap.MaxEntries),
-			},
-			{
-				Name: "Events",
-				Size: int64(eventsmap.MaxEntries),
 			},
 			{
 				Name: "IP cache",
@@ -384,20 +380,8 @@ func (d *Daemon) getBPFMapStatus() *models.BPFMapStatus {
 				Size: int64(option.Config.PolicyMapEntries),
 			},
 			{
-				Name: "Per endpoint policy",
-				Size: int64(eppolicymap.MaxEntries),
-			},
-			{
 				Name: "Session affinity",
 				Size: int64(lbmap.AffinityMapMaxEntries),
-			},
-			{
-				Name: "Signal",
-				Size: int64(signalmap.MaxEntries),
-			},
-			{
-				Name: "Sockmap",
-				Size: int64(sockmap.MaxEntries),
 			},
 			{
 				Name: "Sock reverse NAT",
@@ -515,36 +499,6 @@ func (c *clusterNodesClient) NodeValidateImplementation(node nodeTypes.Node) err
 func (c *clusterNodesClient) NodeConfigurationChanged(config datapath.LocalNodeConfiguration) error {
 	// no-op
 	return nil
-}
-
-func (c *clusterNodesClient) NodeNeighDiscoveryEnabled() bool {
-	// no-op
-	return false
-}
-
-func (c *clusterNodesClient) NodeNeighborRefresh(ctx context.Context, node nodeTypes.Node) {
-	// no-op
-	return
-}
-
-func (c *clusterNodesClient) NodeCleanNeighbors(migrateOnly bool) {
-	// no-op
-	return
-}
-
-func (c *clusterNodesClient) AllocateNodeID(_ net.IP) uint16 {
-	// no-op
-	return 0
-}
-
-func (c *clusterNodesClient) DumpNodeIDs() []*models.NodeID {
-	// no-op
-	return nil
-}
-
-func (c *clusterNodesClient) RestoreNodeIDs() {
-	// no-op
-	return
 }
 
 func (h *getNodes) cleanupClients() {
@@ -1039,54 +993,6 @@ func (d *Daemon) startStatusCollector(cleaner *daemonCleanup) {
 					if s, ok := status.Data.(*models.KubeProxyReplacement); ok {
 						d.statusResponse.KubeProxyReplacement = s
 					}
-				}
-			},
-		},
-		{
-			Name: "write-cni-file",
-			Probe: func(ctx context.Context) (interface{}, error) {
-				if option.Config.WriteCNIConfigurationWhenReady == "" {
-					return &models.Status{
-						State: models.StatusStateDisabled,
-						Msg:   "CNI configuration file management disabled",
-					}, nil
-				}
-
-				// extract cni status from controllers
-				statuses := d.controllers.GetStatusModel()
-				for _, cs := range statuses {
-					if cs.Name != cniControllerName {
-						continue
-					}
-
-					if cs.Status == nil || (cs.Status.FailureCount == 0 && cs.Status.SuccessCount == 0) {
-						return &models.Status{
-							State: models.StatusStateFailure,
-							Msg:   "CNI config file has not yet been written",
-						}, nil
-					}
-					if cs.Status.SuccessCount > 0 {
-						return &models.Status{
-							State: models.StatusStateOk,
-							Msg:   "CNI configuration file successfully written to " + option.Config.WriteCNIConfigurationWhenReady,
-						}, nil
-					}
-
-					return &models.Status{
-						State: models.StatusStateFailure,
-						Msg:   cs.Status.LastFailureMsg,
-					}, nil
-				}
-				return &models.Status{
-					State: models.StatusStateFailure,
-					Msg:   "CNI configuration file controller hasn't yet run",
-				}, nil
-			},
-			OnStatusUpdate: func(status status.Status) {
-				d.statusCollectMutex.Lock()
-				defer d.statusCollectMutex.Unlock()
-				if s, ok := status.Data.(*models.Status); ok {
-					d.statusResponse.CniFile = s
 				}
 			},
 		},

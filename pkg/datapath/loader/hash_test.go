@@ -4,10 +4,10 @@
 package loader
 
 import (
-	. "gopkg.in/check.v1"
+	. "github.com/cilium/checkmate"
 
-	"github.com/cilium/cilium/pkg/datapath"
 	"github.com/cilium/cilium/pkg/datapath/linux/config"
+	datapath "github.com/cilium/cilium/pkg/datapath/types"
 	"github.com/cilium/cilium/pkg/testutils"
 )
 

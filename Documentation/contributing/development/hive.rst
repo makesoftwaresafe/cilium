@@ -401,21 +401,34 @@ returns a cell that "provides" the parsed configuration to the application:
     // }
     // func Config[Cfg Flagger](defaultConfig Cfg) cell.Cell
 
-    type myConfig struct {
+    type MyConfig struct {
         MyOption string
+
+        SliceOption []string
+        MapOption map[string]string
     }
 
-    func (def myConfig) Flags(flags *pflag.FlagSet) {
+    func (def MyConfig) Flags(flags *pflag.FlagSet) {
         // Register the "my-option" flag. This matched against the MyOption field
         // by removing any dashes and doing case insensitive comparison.
         flags.String("my-option", def.MyOption, "My config option")
+
+        // Flags are supported for representing complex types such as slices and maps.
+        // * Slices are obtained splitting the input string on commas.
+        // * Maps support different formats based on how they are provided:
+        //   - CLI: key=value format, separated by commas; the flag can be
+        //     repeated multiple times.
+        //   - Environment variable or configuration file: either JSON encoded
+        //     or comma-separated key=value format.
+        flags.StringSlice("slice-option", def.SliceOption, "My slice config option")
+        flags.StringToString("map-option", def.MapOption, "My map config option")
     }
 
-    var defaultMyConfig = myConfig{
+    var defaultMyConfig = MyConfig{
         MyOption: "the default value",
     }
 
-    func New(cfg myConfig) MyThing
+    func New(cfg MyConfig) MyThing
 
     var Cell = cell.Module(
         "module-with-config",
@@ -424,6 +437,39 @@ returns a cell that "provides" the parsed configuration to the application:
         cell.Config(defaultMyConfig),
         cell.Provide(New),
     )
+
+In tests the configuration can be populated in various ways:
+
+.. code-block:: go
+
+    func TestCell(t *testing.T) {
+        h := hive.New(Cell)
+
+	// Options can be set via Viper
+        h.Viper().Set("my-option", "test-value")
+
+        // Or via pflags
+        flags := pflag.NewFlagSet("", pflag.ContinueOnError)
+        h.RegisterFlags(flags)
+        flags.Set("my-option", "test-value")
+	flags.Parse("--my-option=test-value")
+
+	// Or the preferred way with a config override:
+	h = hive.New(
+            Cell,
+        )
+        AddConfigOverride(
+            h,
+            func(cfg *MyConfig) {
+                cfg.MyOption = "test-override"
+            })
+
+	// To validate that the Cell can be instantiated and the configuration
+        // struct is well-formed without starting you can call Populate():
+        if err := h.Populate(); err != nil {
+            t.Fatalf("Failed to populate: %s", err)
+        }
+    }
 
 .. _api_lifecycle:
 
@@ -554,7 +600,7 @@ started, Run() waits for SIGTERM and SIGINT signals and upon receiving one
 will execute the stop hooks in reverse order to bring the hive down.
 
 Now would be a good time to try this out in practice. You'll find a small example
-application in `pkg/hive/example <https://github.com/cilium/cilium/tree/master/pkg/hive/example>`_.
+application in `pkg/hive/example <https://github.com/cilium/cilium/tree/main/pkg/hive/example>`_.
 Try running it with ``go run .`` and exploring the implementation (try what happens if a provider is commented out!).
 
 Inspecting a hive
@@ -787,8 +833,8 @@ test against and allows central control over what data (and at what rate)
 is pulled from the api-server and how it’s stored (in-memory or persisted).
 
 The resources are usually made available centrally for the application,
-e.g. in cilium-agent they’re provided from `pkg/k8s/shared_resources.go <https://github.com/cilium/cilium/blob/master/pkg/k8s/shared_resources.go>`_.
-See also the runnable example in `pkg/k8s/resource/example <https://github.com/cilium/cilium/tree/master/pkg/k8s/resource/example>`_.
+e.g. in cilium-agent they’re provided from `pkg/k8s/shared_resources.go <https://github.com/cilium/cilium/blob/main/pkg/k8s/shared_resources.go>`_.
+See also the runnable example in `pkg/k8s/resource/example <https://github.com/cilium/cilium/tree/main/pkg/k8s/resource/example>`_.
 
 .. code-block:: go
 
@@ -844,4 +890,150 @@ See also the runnable example in `pkg/k8s/resource/example <https://github.com/c
         }
     }
 
+Job groups
+^^^^^^^^^^
 
+The `job package <https://pkg.go.dev/github.com/cilium/cilium/pkg/hive/job>`_ contains logic that 
+makes it easy to manage units of work that the package refers to as "jobs". These jobs are 
+scheduled as part of a job group. These jobs themselves come in several varieties.
+
+Every job is a callback function provided by the user with additional logic which
+differs slightly for each job type. The jobs and groups manage a lot of the boilerplate
+surrounding lifecycle management. The callbacks are called from the job to perform the actual
+work.
+
+Consider the following example:
+
+.. code-block:: go
+
+    package job_example
+
+    import (
+        "context"
+        "fmt"
+        "math/rand"
+        "runtime/pprof"
+        "time"
+
+        "github.com/cilium/cilium/pkg/hive"
+        "github.com/cilium/cilium/pkg/hive/cell"
+        "github.com/cilium/cilium/pkg/hive/job"
+        "github.com/cilium/cilium/pkg/stream"
+        "github.com/sirupsen/logrus"
+        "k8s.io/client-go/util/workqueue"
+    )
+
+    var Cell = cell.Provide(newExampleCell)
+
+    type exampleCell struct {
+        jobGroup job.Group
+        workChan chan struct{}
+        trigger  job.Trigger
+        logger   logrus.FieldLogger
+    }
+
+    func newExampleCell(
+        lifecycle hive.Lifecycle, 
+        logger logrus.FieldLogger, 
+        registry job.Registry,
+    ) *exampleCell {
+        ex := exampleCell{
+            jobGroup: registry.NewGroup(
+                job.WithLogger(logger),
+                job.WithPprofLabels(pprof.Labels("cell", "example")),
+            ),
+            workChan: make(chan struct{}, 3),
+            trigger:  job.NewTrigger(),
+            logger:   logger,
+        }
+
+        ex.jobGroup.Add(
+            job.OneShot(
+                "sync-on-startup",
+                ex.sync,
+                job.WithRetry(3, workqueue.DefaultControllerRateLimiter()),
+                job.WithShutdown(), // if the retries fail, shutdown the hive
+            ),
+            job.OneShot("daemon", ex.daemon),
+            job.Timer("timer", ex.timer, 5*time.Second, job.WithTrigger(ex.trigger)),
+            job.Observer("observer", ex.observer, stream.FromChannel(ex.workChan)),
+        )
+
+        lifecycle.Append(ex.jobGroup)
+
+        return &ex
+    }
+
+    func (ex *exampleCell) sync(ctx context.Context) error {
+        for i := 0; i < 3; i++ {
+            if err := ex.doSomeWork(); err != nil {
+                return fmt.Errorf("doSomeWork: %w", err)
+            }
+        }
+
+        return nil
+    }
+
+    func (ex *exampleCell) daemon(ctx context.Context) error {
+        for {
+            randomTimeout := time.NewTimer(time.Duration(rand.Intn(3000)) * time.Millisecond)
+            select {
+            case <-ctx.Done():
+                return nil
+
+            case <-randomTimeout.C:
+                ex.doSomeWork()
+            }
+        }
+    }
+
+    func (ex *exampleCell) timer(ctx context.Context) error {
+        if err := ex.doSomeWork(); err != nil {
+            return fmt.Errorf("doSomeWork: %w", err)
+        }
+
+        return nil
+    }
+
+    func (ex *exampleCell) Trigger() {
+        ex.trigger.Trigger()
+    }
+
+    func (ex *exampleCell) observer(ctx context.Context, event struct{}) error {
+        ex.logger.Info("Observed event")
+        return nil
+    }
+
+    func (ex *exampleCell) HeavyLifting() {
+        ex.jobGroup.Add(job.OneShot("long-running-job", func(ctx context.Context) error {
+            for i := 0; i < 1_000_000; i++ {
+                // Do some heavy lifting
+            }
+            return nil
+        }))
+    }
+
+    func (ex *exampleCell) doSomeWork() error {
+        ex.workChan <- struct{}{}
+        return nil
+    }
+
+
+The preceding example shows a number of use cases in one cell. The cell starts by requesting the job.Registry
+by way of the constructor. The registry can create job groups; in most cases, one is enough.
+You can add jobs in the constructor to this group. Any jobs added in the constructor are queued
+until the lifecycle of the cell starts. The group is added to the lifecycle and manages jobs 
+internally. You can also add jobs at runtime, which can be handy for dynamic workloads while still
+guaranteeing a clean shutdown.
+
+A job group cancels the context to all jobs when the lifecycle ends. Any job callbacks are 
+expected to exit as soon as the ``ctx`` is "Done". The group makes sure that all
+jobs are properly shut down before the cell stops. Callbacks that do not stop within a reasonable 
+amount of time may cause the hive to perform a hard shutdown.
+
+There are 3 job types: one-shot jobs, timer jobs, and observer jobs. One-shot jobs run a limited 
+number of times: use them for brief jobs, or for jobs that span the entire lifecycle.
+Once the callback exits without error, it is never called again. Optionally, a one-shot job can include retry
+logic and/or trigger hive shutdown if it fails. Timers are called on a specified interval but they
+can also be externally triggered. Lastly, observer jobs are invoked for every event
+on a ``stream.Observable``.

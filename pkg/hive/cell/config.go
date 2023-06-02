@@ -5,11 +5,14 @@ package cell
 
 import (
 	"fmt"
+	"reflect"
 	"strings"
 
 	"github.com/mitchellh/mapstructure"
 	"github.com/spf13/pflag"
 	"go.uber.org/dig"
+
+	"github.com/cilium/cilium/pkg/command"
 )
 
 // Config constructs a new config cell.
@@ -42,8 +45,6 @@ type Flagger interface {
 	Flags(*pflag.FlagSet)
 }
 
-type AllSettings map[string]any
-
 // config is a cell for configuration. It registers the config's command-line
 // flags and provides the parsed config to the hive.
 type config[Cfg Flagger] struct {
@@ -51,7 +52,16 @@ type config[Cfg Flagger] struct {
 	flags         *pflag.FlagSet
 }
 
-func (c *config[Cfg]) provideConfig(settings AllSettings) (Cfg, error) {
+type AllSettings map[string]any
+
+type configParams[Cfg Flagger] struct {
+	dig.In
+	AllSettings AllSettings
+	Override    func(*Cfg) `optional:"true"`
+}
+
+func (c *config[Cfg]) provideConfig(p configParams[Cfg]) (Cfg, error) {
+	settings := p.AllSettings
 	target := c.defaultConfig
 	decoder, err := mapstructure.NewDecoder(decoderConfig(&target))
 	if err != nil {
@@ -76,6 +86,14 @@ func (c *config[Cfg]) provideConfig(settings AllSettings) (Cfg, error) {
 			"Hint: field 'FooBar' matches flag 'foo-bar', or use tag `mapstructure:\"flag-name\"` to match field with flag",
 			target, err)
 	}
+
+	// See if the configuration was overridden with ConfigOverride. We check the override
+	// after the decode to validate that the config struct is properly formed and all
+	// flags are registered.
+	if p.Override != nil {
+		p.Override(&target)
+	}
+
 	return target, nil
 }
 
@@ -87,6 +105,7 @@ func decoderConfig(target any) *mapstructure.DecoderConfig {
 		DecodeHook: mapstructure.ComposeDecodeHookFunc(
 			mapstructure.StringToTimeDurationHookFunc(),
 			mapstructure.StringToSliceHookFunc(","),
+			stringToMapHookFunc(),
 		),
 		ZeroFields: true,
 		// Error out if the config struct has fields that are
@@ -122,4 +141,16 @@ func (c *config[Cfg]) Info(cont container) (info Info) {
 		info = &InfoStruct{cfg}
 	})
 	return
+}
+
+// stringToMapHookFunc returns a DecodeHookFunc that converts string
+// to map[string]string supporting both json and KV formats.
+func stringToMapHookFunc() mapstructure.DecodeHookFunc {
+	return func(from reflect.Kind, to reflect.Kind, data interface{}) (interface{}, error) {
+		if from != reflect.String || to != reflect.Map {
+			return data, nil
+		}
+
+		return command.ToStringMapStringE(data.(string))
+	}
 }

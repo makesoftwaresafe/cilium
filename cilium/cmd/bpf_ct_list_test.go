@@ -10,7 +10,7 @@ import (
 	"os"
 	"testing"
 
-	. "gopkg.in/check.v1"
+	. "github.com/cilium/checkmate"
 
 	"github.com/cilium/cilium/pkg/byteorder"
 	"github.com/cilium/cilium/pkg/checker"
@@ -86,7 +86,7 @@ func dumpAndRead(maps []interface{}, dump dumpCallback, c *C, args ...interface{
 	defer func() { os.Stdout = stdout }()
 
 	command.ForceJSON()
-	dump(maps, args)
+	dump(maps, args...)
 
 	channel := make(chan string)
 	go func() {

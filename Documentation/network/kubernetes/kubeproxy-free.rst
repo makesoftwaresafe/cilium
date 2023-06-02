@@ -65,22 +65,29 @@ the token returned by ``kubeadm init``
     name on each node.
 
 For existing installations with ``kube-proxy`` running as a DaemonSet, remove it
-by using the following commands below. **Careful:** Be aware that this will break
-existing service connections. It will also stop service related traffic until the
-Cilium replacement has been installed:
+by using the following commands below.
+
+.. warning::
+   Be aware that removing ``kube-proxy`` will break existing service connections. It will also stop service related traffic
+   until the Cilium replacement has been installed.
 
 .. code-block:: shell-session
 
-    $ kubectl -n kube-system delete ds kube-proxy
-    $ # Delete the configmap as well to avoid kube-proxy being reinstalled during a Kubeadm upgrade (works only for K8s 1.19 and newer)
-    $ kubectl -n kube-system delete cm kube-proxy
-    $ # Run on each node with root permissions:
-    $ iptables-save | grep -v KUBE | iptables-restore
+   $ kubectl -n kube-system delete ds kube-proxy
+   $ # Delete the configmap as well to avoid kube-proxy being reinstalled during a Kubeadm upgrade (works only for K8s 1.19 and newer)
+   $ kubectl -n kube-system delete cm kube-proxy
+   $ # Run on each node with root permissions:
+   $ iptables-save | grep -v KUBE | iptables-restore
 
 .. include:: ../../installation/k8s-install-download-release.rst
 
-Next, generate the required YAML files and deploy them. **Important:** Make sure you correctly set your
-``API_SERVER_IP`` and ``API_SERVER_PORT`` below with the control-plane node IP address and the kube-apiserver port number reported by ``kubeadm init`` (Kubeadm will use port ``6443`` by default).
+Next, generate the required YAML files and deploy them. 
+
+.. important::
+
+   Make sure you correctly set your ``API_SERVER_IP`` and ``API_SERVER_PORT``
+   below with the control-plane node IP address and the kube-apiserver port
+   number reported by ``kubeadm init`` (Kubeadm will use port ``6443`` by default).
 
 Specifying this is necessary as ``kubeadm init`` is run explicitly without setting
 up kube-proxy and as a consequence, although it exports ``KUBERNETES_SERVICE_HOST``
@@ -178,7 +185,7 @@ Use ``--verbose`` for full details:
 As an optional next step, we will create an Nginx Deployment. Then we'll create a new NodePort service and
 validate that Cilium installed the service correctly.
 
-The following yaml is used for the backend pods:
+The following YAML is used for the backend pods:
 
 .. code-block:: yaml
 
@@ -359,8 +366,8 @@ Maglev Consistent Hashing (Beta)
 ********************************
 
 Cilium's eBPF kube-proxy replacement supports consistent hashing by implementing a variant
-of `The Maglev paper <https://storage.googleapis.com/pub-tools-public-publication-data/pdf/44824.pdf>`_
-hashing in its load balancer for backend selection. This improves resiliency in case of
+of `The Maglev hashing <https://storage.googleapis.com/pub-tools-public-publication-data/pdf/44824.pdf>`_
+in its load balancer for backend selection. This improves resiliency in case of
 failures. As well, it provides better load balancing properties since Nodes added to the cluster will
 make consistent backend selection throughout the cluster for a given 5-tuple without
 having to synchronize state with the other Nodes. Similarly, upon backend removal the backend
@@ -477,7 +484,7 @@ made aware of the service IP/port which they need to reply with. Therefore, Cili
 encodes this information in a Cilium-specific IPv4 option or IPv6 Destination Option
 extension header at the cost of advertising a lower MTU. For TCP services, Cilium
 only encodes the service IP/port for the SYN packet, but not subsequent ones. The
-latter also allows to operate Cilium in a hybrid mode as detailed in the next subsection
+latter also allows to operate Cilium in a hybrid mode as detailed in the later subsection
 where DSR is used for TCP and SNAT for UDP in order to avoid an otherwise needed MTU
 reduction.
 
@@ -486,8 +493,9 @@ due to the Cilium-specific IP options that could be dropped by an underlying net
 In case of connectivity issues to services where backends are located on
 a remote node from the node that is processing the given NodePort request,
 first check whether the NodePort request actually arrived on the node
-containing the backend. If this was not the case, then switching back to the default
-SNAT mode would be advised as a workaround.
+containing the backend. If this was not the case, then consider either switching to
+DSR with Geneve which will be described in the later sections, or switching back to
+the default SNAT mode would be advised as a workaround.
 
 Also, in some public cloud provider environments, which implement a source /
 destination IP address checking (e.g. AWS), the checking has to be disabled in
@@ -500,9 +508,56 @@ enabled would look as follows:
 
     helm install cilium |CHART_RELEASE| \\
         --namespace kube-system \\
+        --set routingMode=native \\
+        --set kubeProxyReplacement=strict \\
+        --set loadBalancer.mode=dsr \\
+        --set k8sServiceHost=${API_SERVER_IP} \\
+        --set k8sServicePort=${API_SERVER_PORT}
+
+.. _DSR mode with Geneve:
+
+Direct Server Return (DSR) with Geneve
+**************************************
+By default, Cilium with DSR mode encodes the service IP/port in a Cilium-specific
+IPv4 option or IPv6 Destination Option extension so that the backends are aware of
+the service IP/port, which they need to reply with.
+
+However, some data center routers pass packets with unknown IP options to software
+processing called "Layer 2 slow path". Those routers drop the packets if the amount
+of packets with IP options exceeds a given threshold, which may significantly affect
+network performance.
+
+Cilium offers another dispatch mode, DSR with Geneve, to avoid this problem.
+In DSR with Geneve, Cilium encapsulates packets to the Loadbalancer with the Geneve
+header that includes the service IP/port in the Geneve option and redirects them
+to the backends.
+
+The Helm example configuration in a kube-proxy-free environment with DSR and
+Geneve dispatch enabled would look as follows:
+
+.. parsed-literal::
+    helm install cilium |CHART_RELEASE| \\
+        --namespace kube-system \\
         --set tunnel=disabled \\
         --set kubeProxyReplacement=strict \\
         --set loadBalancer.mode=dsr \\
+        --set loadBalancer.dsrDispatch=geneve \\
+        --set k8sServiceHost=${API_SERVER_IP} \\
+        --set k8sServicePort=${API_SERVER_PORT}
+
+DSR with Geneve is compatible with the Geneve encapsulation mode (:ref:`arch_overlay`).
+It works with either the direct routing mode or the Geneve tunneling mode. Unfortunately,
+it doesn't work with the vxlan encapsulation mode.
+
+The example configuration in DSR with Geneve dispatch and tunneling mode is as follows.
+
+.. parsed-literal::
+    helm install cilium |CHART_RELEASE| \\
+        --namespace kube-system \\
+        --set tunnel=geneve \\
+        --set kubeProxyReplacement=strict \\
+        --set loadBalancer.mode=dsr \\
+        --set loadBalancer.dsrDispatch=geneve \\
         --set k8sServiceHost=${API_SERVER_IP} \\
         --set k8sServicePort=${API_SERVER_PORT}
 
@@ -528,7 +583,7 @@ mode would look as follows:
 
     helm install cilium |CHART_RELEASE| \\
         --namespace kube-system \\
-        --set tunnel=disabled \\
+        --set routingMode=native \\
         --set kubeProxyReplacement=strict \\
         --set loadBalancer.mode=hybrid \\
         --set k8sServiceHost=${API_SERVER_IP} \\
@@ -548,8 +603,9 @@ therefore no additional lower layer NAT is required.
 
 Cilium has built-in support for bypassing the socket-level loadbalancer and falling back
 to the tc loadbalancer at the veth interface when a custom redirection/operation relies
-on the original ClusterIP within pod namespace (e.g., Istio side-car) or due to the Pod's
-nature the socket-level loadbalancer is ineffective (e.g., KubeVirt, Kata Containers).
+on the original ClusterIP within pod namespace (e.g., Istio sidecar) or due to the Pod's
+nature the socket-level loadbalancer is ineffective (e.g., KubeVirt, Kata Containers,
+gVisor).
 
 Setting ``socketLB.hostNamespaceOnly=true`` enables this bypassing mode. When enabled,
 this circumvents socket rewrite in the ``connect()`` and ``sendmsg()`` syscall bpf hook and
@@ -563,7 +619,7 @@ looks as follows:
 
     helm install cilium |CHART_RELEASE| \\
         --namespace kube-system \\
-        --set tunnel=disabled \\
+        --set routingMode=native \\
         --set kubeProxyReplacement=strict \\
         --set socketLB.hostNamespaceOnly=true
 
@@ -579,14 +635,14 @@ in Cilium version `1.8 <https://cilium.io/blog/2020/06/22/cilium-18/#kube-proxy-
 the XDP (eXpress Data Path) layer where eBPF is operating directly in the networking
 driver instead of a higher layer.
 
-The mode setting ``loadBalancer.acceleration`` allows to enable this acceleration
-through the option ``native``. The option ``disabled`` is the default and disables the
-acceleration. The majority of drivers supporting 10G or higher rates also support
-``native`` XDP on a recent kernel. For cloud based deployments most of these drivers
-have SR-IOV variants that support native XDP as well. For on-prem deployments the
-Cilium XDP acceleration can be used in combination with LoadBalancer service
-implementations for Kubernetes such as `MetalLB <https://metallb.universe.tf/>`_. The
-acceleration can be enabled only on a single device which is used for direct routing.
+Setting ``loadBalancer.acceleration`` to option ``native`` enables this acceleration.
+The option ``disabled`` is the default and disables the acceleration. The majority
+of drivers supporting 10G or higher rates also support ``native`` XDP on a recent
+kernel. For cloud based deployments most of these drivers have SR-IOV variants that
+support native XDP as well. For on-prem deployments the Cilium XDP acceleration can
+be used in combination with LoadBalancer service implementations for Kubernetes such
+as `MetalLB <https://metallb.universe.tf/>`_. The acceleration can be enabled only
+on a single device which is used for direct routing.
 
 For high-scale environments, also consider tweaking the default map sizes to a larger
 number of entries e.g. through setting a higher ``config.bpfMapDynamicSizeRatio``.
@@ -599,7 +655,7 @@ modes and can be enabled as follows for ``loadBalancer.mode=hybrid`` in this exa
 
     helm install cilium |CHART_RELEASE| \\
         --namespace kube-system \\
-        --set tunnel=disabled \\
+        --set routingMode=native \\
         --set kubeProxyReplacement=strict \\
         --set loadBalancer.acceleration=native \\
         --set loadBalancer.mode=hybrid \\
@@ -614,59 +670,10 @@ each underlying device's driver must have native XDP support on all Cilium manag
 nodes. In addition, for performance reasons we recommend kernel >= 5.5 for
 the multi-device XDP acceleration.
 
-NodePort acceleration can be used with either direct routing (``tunnel=disabled``)
+NodePort acceleration can be used with either direct routing (``routingMode=native``)
 or tunnel mode. Direct routing is recommended to achieve optimal performance.
 
-A list of drivers supporting native XDP can be found in the table below. The
-corresponding network driver name of an interface can be determined as follows:
-
-.. code-block:: shell-session
-
-    # ethtool -i eth0
-    driver: nfp
-    [...]
-
-+-------------------+------------+-------------+
-| Vendor            | Driver     | XDP Support |
-+===================+============+=============+
-| Amazon            | ena        | >= 5.6      |
-+-------------------+------------+-------------+
-| Broadcom          | bnxt_en    | >= 4.11     |
-+-------------------+------------+-------------+
-| Cavium            | thunderx   | >= 4.12     |
-+-------------------+------------+-------------+
-| Freescale         | dpaa2      | >= 5.0      |
-+-------------------+------------+-------------+
-| Intel             | ixgbe      | >= 4.12     |
-|                   +------------+-------------+
-|                   | ixgbevf    | >= 4.17     |
-|                   +------------+-------------+
-|                   | i40e       | >= 4.13     |
-|                   +------------+-------------+
-|                   | ice        | >= 5.5      |
-+-------------------+------------+-------------+
-| Marvell           | mvneta     | >= 5.5      |
-+-------------------+------------+-------------+
-| Mellanox          | mlx4       | >= 4.8      |
-|                   +------------+-------------+
-|                   | mlx5       | >= 4.9      |
-+-------------------+------------+-------------+
-| Microsoft         | hv_netvsc  | >= 5.6      |
-+-------------------+------------+-------------+
-| Netronome         | nfp        | >= 4.10     |
-+-------------------+------------+-------------+
-| Others            | virtio_net | >= 4.10     |
-|                   +------------+-------------+
-|                   | tun/tap    | >= 4.14     |
-+-------------------+------------+-------------+
-| Qlogic            | qede       | >= 4.10     |
-+-------------------+------------+-------------+
-| Socionext         | netsec     | >= 5.3      |
-+-------------------+------------+-------------+
-| Solarflare        | sfc        | >= 5.5      |
-+-------------------+------------+-------------+
-| Texas Instruments | cpsw       | >= 5.3      |
-+-------------------+------------+-------------+
+A list of drivers supporting XDP can be found in :ref:`the XDP documentation<xdp_drivers>`.
 
 The current Cilium kube-proxy XDP acceleration mode can also be introspected through
 the ``cilium status`` CLI command. If it has been enabled successfully, ``Native``
@@ -848,7 +855,7 @@ will automatically configure your virtual network to route pod traffic correctly
      --set azure.tenantID=$AZURE_TENANT_ID \\
      --set azure.clientID=$AZURE_CLIENT_ID \\
      --set azure.clientSecret=$AZURE_CLIENT_SECRET \\
-     --set tunnel=disabled \\
+     --set routingMode=native \\
      --set enableIPv4Masquerade=false \\
      --set devices=eth0 \\
      --set kubeProxyReplacement=strict \\
@@ -892,7 +899,7 @@ When multiple devices are used, only one device can be used for direct routing
 between Cilium nodes. By default, if a single device was detected or specified
 via ``devices`` then Cilium will use that device for direct routing.
 Otherwise, Cilium will use a device with Kubernetes InternalIP or ExternalIP
-being set. InternalIP is preferred over ExternalIP if both exist. To change
+set. InternalIP is preferred over ExternalIP if both exist. To change
 the direct routing device, set the ``nodePort.directRoutingDevice`` Helm
 option, e.g. ``nodePort.directRoutingDevice=eth1``. The wildcard option can be
 used as well as the devices option, e.g. ``directRoutingDevice=eth+``.
@@ -1083,22 +1090,27 @@ Cilium's eBPF kube-proxy replacement can be configured in several modes, i.e. it
 replace kube-proxy entirely or it can co-exist with kube-proxy on the system if the
 underlying Linux kernel requirements do not support a full kube-proxy replacement.
 
-**Careful:** When deploying the eBPF kube-proxy replacement under co-existence with
-kube-proxy on the system, be aware that both mechanisms operate independent of each
-other. Meaning, if the eBPF kube-proxy replacement is added or removed on an already
-*running* cluster in order to delegate operation from respectively back to kube-proxy,
-then it must be expected that existing connections will break since, for example,
-both NAT tables are not aware of each other. If deployed in co-existence on a newly
-spawned up node/cluster which does not yet serve user traffic, then this is not an
-issue.
+.. warning::
+   When deploying the eBPF kube-proxy replacement under co-existence with
+   kube-proxy on the system, be aware that both mechanisms operate independent of each
+   other. Meaning, if the eBPF kube-proxy replacement is added or removed on an already
+   *running* cluster in order to delegate operation from respectively back to kube-proxy,
+   then it must be expected that existing connections will break since, for example,
+   both NAT tables are not aware of each other. If deployed in co-existence on a newly
+   spawned up node/cluster which does not yet serve user traffic, then this is not an
+   issue.
 
 This section elaborates on the various ``kubeProxyReplacement`` options:
 
-- ``kubeProxyReplacement=strict``: This option expects a kube-proxy-free
-  Kubernetes setup where Cilium is expected to fully replace all kube-proxy
-  functionality. Once the Cilium agent is up and running, it takes care of handling
-  Kubernetes services of type ClusterIP, NodePort, LoadBalancer, services with externalIPs
-  as well as HostPort. If the underlying kernel version requirements are not met
+- ``kubeProxyReplacement=strict``: When using this option, it's highly recommended
+  to run a kube-proxy-free Kubernetes setup where Cilium is expected to fully replace
+  all kube-proxy functionality. However, if it's not possible to remove kube-proxy for
+  specific reasons (e.g. Kubernetes distribution limitations), it's also acceptable to
+  leave it deployed in the background. Just be aware of the potential side effects on
+  existing nodes as mentioned above when running kube-proxy in co-existence. Once the
+  Cilium agent is up and running, it takes care of handling Kubernetes services of type
+  ClusterIP, NodePort, LoadBalancer, services with externalIPs as well as HostPort.
+  If the underlying kernel version requirements are not met
   (see :ref:`kubeproxy-free` note), then the Cilium agent will bail out on start-up
   with an error message.
 
@@ -1118,6 +1130,13 @@ This section elaborates on the various ``kubeProxyReplacement`` options:
   this server, and there would otherwise be a clash when cilium attempts to bind its server to the
   same port). A few example configurations
   for the ``partial`` option are provided below.
+
+.. note::
+
+    Switching from the ``strict`` to ``disabled`` mode, or vice versa can break
+    existing connections to services in a cluster. The same goes for enabling, or
+    disabling ``socketLB``. It is recommended to drain all the workloads before
+    performing such configuration changes.
 
   The following Helm setup below would be equivalent to ``kubeProxyReplacement=strict``
   in a kube-proxy-free environment:
@@ -1200,6 +1219,11 @@ gracefully. The endpoint state is fully removed when the agent receives
 a Kubernetes delete event for the endpoint. The `Kubernetes
 pod termination <https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle/#pod-termination>`_
 documentation contains more background on the behavior and configuration using ``terminationGracePeriodSeconds``.
+There are some special cases, like zero disruption during rolling updates, that require to be able to send traffic
+to Terminating Pods that are still Serving traffic during the Terminating period, the Kubernetes blog
+`Advancements in Kubernetes Traffic Engineering
+<https://kubernetes.io/blog/2022/12/30/advancements-in-kubernetes-traffic-engineering/#traffic-loss-from-load-balancers-during-rolling-updates>`_
+explains it in detail.
 
 .. admonition:: Video
   :class: attention
@@ -1531,6 +1555,28 @@ For more information, ensure that you have the fix `Pull Request <https://github
     48496    recvmsg6
     48498    getpeername4
     48494    getpeername6
+
+Known Issues
+############
+
+For clusters deployed with Cilium version 1.11.14 or earlier, service backend entries could
+be leaked in the BPF maps in some instances. The known cases that could lead
+to such leaks are due to race conditions between deletion of a service backend
+while it's terminating, and simultaneous deletion of the service the backend is
+associated with. This could lead to duplicate backend entries that could eventually
+fill up the ``cilium_lb4_backends_v2`` map.
+In such cases, you might see error messages like these in the Cilium agent logs::
+
+    Unable to update element for cilium_lb4_backends_v2 map with file descriptor 15: the map is full, please consider resizing it. argument list too long
+
+While the leak was fixed in Cilium version 1.11.15, in some cases, any affected clusters upgrading
+from the problematic cilium versions 1.11.14 or earlier to any subsequent versions may not
+see the leaked backends cleaned up from the BPF maps after the Cilium agent restarts.
+The fixes to clean up leaked duplicate backend entries were backported to older
+releases, and are available as part of Cilium versions v1.11.16, v1.12.9 and v1.13.2.
+Fresh clusters deploying Cilium versions 1.11.15 or later don't experience this leak issue.
+
+For more information, see `this GitHub issue <https://github.com/cilium/cilium/issues/23551>`__.
 
 Limitations
 ###########

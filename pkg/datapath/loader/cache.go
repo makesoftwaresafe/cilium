@@ -15,8 +15,8 @@ import (
 
 	"github.com/cilium/cilium/pkg/common"
 	"github.com/cilium/cilium/pkg/controller"
-	"github.com/cilium/cilium/pkg/datapath"
 	"github.com/cilium/cilium/pkg/datapath/loader/metrics"
+	datapath "github.com/cilium/cilium/pkg/datapath/types"
 	"github.com/cilium/cilium/pkg/defaults"
 	"github.com/cilium/cilium/pkg/lock"
 	"github.com/cilium/cilium/pkg/logging/logfields"
@@ -32,6 +32,7 @@ var ignoredELFPrefixes = []string{
 	"IPV6_NODEPORT",              // Global
 	"ROUTER_IP",                  // Global
 	"SNAT_IPV6_EXTERNAL",         // Global
+	"cilium_auth_map",            // Global
 	"cilium_call_policy",         // Global
 	"cilium_egresscall_policy",   // Global
 	"cilium_capture",             // Global
@@ -47,6 +48,7 @@ var ignoredELFPrefixes = []string{
 	"cilium_node_map",            // Global
 	"cilium_policy",              // All policy maps
 	"cilium_proxy",               // Global
+	"cilium_runtime_config",      // Global
 	"cilium_signals",             // Global
 	"cilium_snat",                // All SNAT maps
 	"cilium_tail_call_buffer",    // Global
@@ -64,6 +66,7 @@ var ignoredELFPrefixes = []string{
 	"cilium_srv6_sid",            // Global
 	"cilium_vtep_map",            // Global
 	"cilium_per_cluster_ct",      // Global
+	"cilium_world_cidrs4",        // Global
 	"from-container",             // Prog name
 	"to-container",               // Prog name
 	"from-netdev",                // Prog name

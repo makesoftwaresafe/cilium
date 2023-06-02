@@ -25,14 +25,16 @@ const (
 var _ translation.Translator = (*DedicatedIngressTranslator)(nil)
 
 type DedicatedIngressTranslator struct {
-	secretsNamespace string
-	enforceHTTPs     bool
+	secretsNamespace   string
+	enforceHTTPs       bool
+	idleTimeoutSeconds int
 }
 
-func NewDedicatedIngressTranslator(secretsNamespace string, enforceHTTPs bool) *DedicatedIngressTranslator {
+func NewDedicatedIngressTranslator(secretsNamespace string, enforceHTTPs bool, idleTimeoutSeconds int) *DedicatedIngressTranslator {
 	return &DedicatedIngressTranslator{
-		secretsNamespace: secretsNamespace,
-		enforceHTTPs:     enforceHTTPs,
+		secretsNamespace:   secretsNamespace,
+		enforceHTTPs:       enforceHTTPs,
+		idleTimeoutSeconds: idleTimeoutSeconds,
 	}
 }
 
@@ -46,7 +48,7 @@ func (d *DedicatedIngressTranslator) Translate(m *model.Model) (*ciliumv2.Cilium
 
 	// The logic is same as what we have with default translator, but with a different model
 	// (i.e. the HTTP listeners are just belonged to one Ingress resource).
-	translator := translation.NewTranslator(name, namespace, d.secretsNamespace, d.enforceHTTPs, false)
+	translator := translation.NewTranslator(name, namespace, d.secretsNamespace, d.enforceHTTPs, false, d.idleTimeoutSeconds)
 	cec, _, _, err := translator.Translate(m)
 	if err != nil {
 		return nil, nil, nil, err
@@ -54,15 +56,6 @@ func (d *DedicatedIngressTranslator) Translate(m *model.Model) (*ciliumv2.Cilium
 
 	// Set the name to avoid any breaking change during upgrade.
 	cec.Name = fmt.Sprintf("%s-%s-%s", ciliumIngressPrefix, namespace, m.HTTP[0].Sources[0].Name)
-	// Set the owner reference to the CEC object.
-	cec.OwnerReferences = []metav1.OwnerReference{
-		{
-			APIVersion: slim_networkingv1.SchemeGroupVersion.String(),
-			Kind:       "Ingress",
-			Name:       m.HTTP[0].Sources[0].Name,
-			UID:        types.UID(m.HTTP[0].Sources[0].UID),
-		},
-	}
 	return cec, getService(m.HTTP[0].Sources[0], m.HTTP[0].Service), getEndpoints(m.HTTP[0].Sources[0]), err
 }
 

@@ -34,6 +34,7 @@ import (
 	"github.com/cilium/cilium/pkg/hive"
 	"github.com/cilium/cilium/pkg/hive/cell"
 	ipamOption "github.com/cilium/cilium/pkg/ipam/option"
+	"github.com/cilium/cilium/pkg/k8s/apis"
 	cilium_v2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
 	k8sClient "github.com/cilium/cilium/pkg/k8s/client"
 	slim_corev1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/api/core/v1"
@@ -123,7 +124,6 @@ func (cpt *ControlPlaneTest) SetupEnvironment(modConfig func(*agentOption.Daemon
 	agentOption.Config.Debug = true
 
 	operatorOption.Config.Populate(operatorCmd.Vp)
-	operatorOption.Config.SkipCRDCreation = true
 
 	// Apply the test specific global configuration
 	modConfig(agentOption.Config, operatorOption.Config)
@@ -138,7 +138,7 @@ func (cpt *ControlPlaneTest) StartAgent() *ControlPlaneTest {
 	if cpt.agentHandle != nil {
 		cpt.t.Fatal("StartAgent() already called")
 	}
-	datapath, agentHandle, err := startCiliumAgent(cpt.t, cpt.nodeName, cpt.clients)
+	datapath, agentHandle, err := startCiliumAgent(cpt.t, cpt.clients)
 	if err != nil {
 		cpt.t.Fatalf("Failed to start cilium agent: %s", err)
 	}
@@ -167,6 +167,8 @@ func (cpt *ControlPlaneTest) StartOperator(modCellConfig func(vp *viper.Viper)) 
 			operatorCmd.OperatorCell,
 		),
 	}
+
+	cpt.operatorHandle.hive.Viper().Set(apis.SkipCRDCreation, true)
 
 	// Apply the test specific cells configuration
 	//
@@ -493,6 +495,14 @@ func filterList(obj k8sRuntime.Object, restrictions k8sTesting.ListRestrictions)
 	switch obj := obj.(type) {
 	case *corev1.NodeList:
 		items := make([]corev1.Node, 0, len(obj.Items))
+		for i := range obj.Items {
+			if matchFieldSelector(&obj.Items[i], selector) {
+				items = append(items, obj.Items[i])
+			}
+		}
+		obj.Items = items
+	case *slim_corev1.NodeList:
+		items := make([]slim_corev1.Node, 0, len(obj.Items))
 		for i := range obj.Items {
 			if matchFieldSelector(&obj.Items[i], selector) {
 				items = append(items, obj.Items[i])

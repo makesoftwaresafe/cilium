@@ -64,27 +64,43 @@ struct {
 } THROTTLE_MAP __section_maps_btf;
 #endif /* ENABLE_BANDWIDTH_MANAGER */
 
-/* Map to link endpoint id to per endpoint cilium_policy map */
-#ifdef SOCKMAP
-struct {
-	__uint(type, BPF_MAP_TYPE_HASH_OF_MAPS);
-	__type(key, struct endpoint_key);
-	__type(value, int);
-	__uint(pinning, LIBBPF_PIN_BY_NAME);
-	__uint(max_entries, ENDPOINTS_MAP_SIZE);
-} EP_POLICY_MAP __section_maps_btf;
-#endif
-
 #ifdef POLICY_MAP
 /* Per-endpoint policy enforcement map */
 struct {
-	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(type, BPF_MAP_TYPE_LPM_TRIE);
 	__type(key, struct policy_key);
 	__type(value, struct policy_entry);
 	__uint(pinning, LIBBPF_PIN_BY_NAME);
 	__uint(max_entries, POLICY_MAP_SIZE);
-	__uint(map_flags, CONDITIONAL_PREALLOC);
+	__uint(map_flags, BPF_F_NO_PREALLOC);
 } POLICY_MAP __section_maps_btf;
+#endif
+
+#ifdef AUTH_MAP
+/* Global auth map for enforcing authentication policy */
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__type(key, struct auth_key);
+	__type(value, struct auth_info);
+	__uint(pinning, LIBBPF_PIN_BY_NAME);
+	__uint(max_entries, AUTH_MAP_SIZE);
+	__uint(map_flags, BPF_F_NO_PREALLOC);
+} AUTH_MAP __section_maps_btf;
+#endif
+
+#ifdef CONFIG_MAP
+/*
+ * CONFIG_MAP is an array containing runtime configuration information to the
+ * bpf datapath.  Each element in the array is a 64-bit integer, meaning of
+ * which is defined by the source of that index.
+ */
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__type(key, __u32);
+	__type(value, __u64);
+	__uint(pinning, LIBBPF_PIN_BY_NAME);
+	__uint(max_entries, CONFIG_MAP_SIZE);
+} CONFIG_MAP __section_maps_btf;
 #endif
 
 #ifndef SKIP_CALLS_MAP
@@ -133,38 +149,6 @@ struct bpf_elf_map __section_maps CUSTOM_CALLS_MAP = {
 #define CUSTOM_CALLS_IDX_IPV6_EGRESS	3
 #endif /* ENABLE_CUSTOM_CALLS && CUSTOM_CALLS_MAP */
 
-#ifdef HAVE_LPM_TRIE_MAP_TYPE
-#define LPM_MAP_TYPE BPF_MAP_TYPE_LPM_TRIE
-#else
-#define LPM_MAP_TYPE BPF_MAP_TYPE_HASH
-#endif
-
-#ifndef HAVE_LPM_TRIE_MAP_TYPE
-/* Define a function with the following NAME which iterates through PREFIXES
- * (a list of integers ordered from high to low representing prefix length),
- * performing a lookup in MAP using LOOKUP_FN to find a provided IP of type
- * IPTYPE.
- */
-#define LPM_LOOKUP_FN(NAME, IPTYPE, PREFIXES, MAP, LOOKUP_FN)		\
-static __always_inline int __##NAME(IPTYPE addr)			\
-{									\
-	int prefixes[] = { PREFIXES };					\
-	const int size = ARRAY_SIZE(prefixes);				\
-	int i;								\
-									\
-_Pragma("unroll")							\
-	for (i = 0; i < size; i++)					\
-		if (LOOKUP_FN(&MAP, addr, prefixes[i]))			\
-			return 1;					\
-									\
-	return 0;							\
-}
-#endif /* HAVE_LPM_TRIE_MAP_TYPE */
-
-#ifndef SKIP_UNDEF_LPM_LOOKUP_FN
-#undef LPM_LOOKUP_FN
-#endif
-
 struct ipcache_key {
 	struct bpf_lpm_trie_key lpm_key;
 	__u16 pad1;
@@ -183,7 +167,7 @@ struct ipcache_key {
 
 /* Global IP -> Identity map for applying egress label-based policy */
 struct {
-	__uint(type, LPM_MAP_TYPE);
+	__uint(type, BPF_MAP_TYPE_LPM_TRIE);
 	__type(key, struct ipcache_key);
 	__type(value, struct remote_endpoint_info);
 	__uint(pinning, LIBBPF_PIN_BY_NAME);
@@ -225,11 +209,11 @@ struct {
 
 #ifdef ENABLE_EGRESS_GATEWAY
 struct {
-	__uint(type, LPM_MAP_TYPE);
+	__uint(type, BPF_MAP_TYPE_LPM_TRIE);
 	__type(key, struct egress_gw_policy_key);
 	__type(value, struct egress_gw_policy_entry);
 	__uint(pinning, LIBBPF_PIN_BY_NAME);
-	__uint(max_entries, EGRESS_POLICY_MAP_SIZE);
+	__uint(max_entries, 16384);
 	__uint(map_flags, BPF_F_NO_PREALLOC);
 } EGRESS_POLICY_MAP __section_maps_btf;
 
@@ -295,6 +279,22 @@ struct {
 	__uint(map_flags, CONDITIONAL_PREALLOC);
 } VTEP_MAP __section_maps_btf;
 #endif /* ENABLE_VTEP */
+
+#ifdef ENABLE_HIGH_SCALE_IPCACHE
+struct world_cidrs_key4 {
+	struct bpf_lpm_trie_key lpm_key;
+	__u32 ip;
+} __packed;
+
+struct {
+	__uint(type, BPF_MAP_TYPE_LPM_TRIE);
+	__type(key, struct world_cidrs_key4);
+	__type(value, __u8);
+	__uint(pinning, LIBBPF_PIN_BY_NAME);
+	__uint(max_entries, WORLD_CIDRS4_MAP_SIZE);
+	__uint(map_flags, BPF_F_NO_PREALLOC);
+} WORLD_CIDRS4_MAP __section_maps_btf;
+#endif /* ENABLE_HIGH_SCALE_IPCACHE */
 
 #ifndef SKIP_CALLS_MAP
 static __always_inline void ep_tail_call(struct __ctx_buff *ctx __maybe_unused,

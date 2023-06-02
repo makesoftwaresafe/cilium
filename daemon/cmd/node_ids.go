@@ -7,18 +7,18 @@ import (
 	"github.com/go-openapi/runtime/middleware"
 
 	. "github.com/cilium/cilium/api/v1/server/restapi/daemon"
-	"github.com/cilium/cilium/pkg/datapath"
+	datapath "github.com/cilium/cilium/pkg/datapath/types"
 )
 
 type getNodeIDHandler struct {
-	nodeHandler datapath.NodeHandler
+	nodeIDHandler datapath.NodeIDHandler
 }
 
-func NewGetNodeIDsHandler(h datapath.NodeHandler) GetNodeIdsHandler {
-	return &getNodeIDHandler{nodeHandler: h}
+func NewGetNodeIDsHandler(h datapath.NodeIDHandler) GetNodeIdsHandler {
+	return &getNodeIDHandler{nodeIDHandler: h}
 }
 
 func (h *getNodeIDHandler) Handle(_ GetNodeIdsParams) middleware.Responder {
-	dump := h.nodeHandler.DumpNodeIDs()
+	dump := h.nodeIDHandler.DumpNodeIDs()
 	return NewGetNodeIdsOK().WithPayload(dump)
 }

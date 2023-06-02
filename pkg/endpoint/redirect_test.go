@@ -1,17 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright Authors of Cilium
 
-//go:build integration_tests
-
 package endpoint
 
 import (
 	"context"
 
-	"gopkg.in/check.v1"
+	check "github.com/cilium/checkmate"
 
 	"github.com/cilium/cilium/pkg/completion"
-	"github.com/cilium/cilium/pkg/datapath"
+	datapath "github.com/cilium/cilium/pkg/datapath/types"
 	"github.com/cilium/cilium/pkg/fqdn/restore"
 	"github.com/cilium/cilium/pkg/identity"
 	"github.com/cilium/cilium/pkg/identity/cache"
@@ -25,6 +23,7 @@ import (
 	"github.com/cilium/cilium/pkg/policy/trafficdirection"
 	"github.com/cilium/cilium/pkg/proxy/logger"
 	"github.com/cilium/cilium/pkg/revert"
+	"github.com/cilium/cilium/pkg/testutils"
 	testipcache "github.com/cilium/cilium/pkg/testutils/ipcache"
 	"github.com/cilium/cilium/pkg/u8proto"
 )
@@ -34,6 +33,10 @@ type RedirectSuite struct{}
 // suite can be used by testing.T benchmarks or tests as a mock regeneration.Owner
 var redirectSuite = RedirectSuite{}
 var _ = check.Suite(&redirectSuite)
+
+func (s *RedirectSuite) SetUpSuite(c *check.C) {
+	testutils.IntegrationCheck(c)
+}
 
 // RedirectSuiteProxy implements EndpointProxy. It is used for testing the
 // functions related to generating proxy redirects for a given Endpoint.
@@ -57,10 +60,6 @@ func (r *RedirectSuiteProxy) RemoveRedirect(id string, wg *completion.WaitGroup)
 // UpdateNetworkPolicy does nothing.
 func (r *RedirectSuiteProxy) UpdateNetworkPolicy(ep logger.EndpointUpdater, vis *policy.VisibilityPolicy, policy *policy.L4Policy, ingressPolicyEnforced, egressPolicyEnforced bool, wg *completion.WaitGroup) (error, func() error) {
 	return nil, nil
-}
-
-// UseCurrentNetworkPolicy does nothing.
-func (r *RedirectSuiteProxy) UseCurrentNetworkPolicy(ep logger.EndpointUpdater, policy *policy.L4Policy, wg *completion.WaitGroup) {
 }
 
 // RemoveNetworkPolicy does nothing.
@@ -139,7 +138,7 @@ func (s *RedirectSuite) TestAddVisibilityRedirects(c *check.C) {
 	idAllocatorOwner := &DummyIdentityAllocatorOwner{}
 
 	mgr := NewCachingIdentityAllocator(idAllocatorOwner)
-	<-mgr.InitIdentityAllocator(nil, nil)
+	<-mgr.InitIdentityAllocator(nil)
 	defer mgr.Close()
 
 	do := &DummyOwner{

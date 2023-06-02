@@ -6,9 +6,9 @@ package fake
 import (
 	"testing"
 
-	"gopkg.in/check.v1"
+	check "github.com/cilium/checkmate"
 
-	"github.com/cilium/cilium/pkg/datapath"
+	datapath "github.com/cilium/cilium/pkg/datapath/types"
 	nodeTypes "github.com/cilium/cilium/pkg/node/types"
 )
 

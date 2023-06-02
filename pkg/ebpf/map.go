@@ -18,6 +18,8 @@ import (
 
 type MapSpec = ciliumebpf.MapSpec
 
+type PinType = ciliumebpf.PinType
+
 const (
 	Hash       = ciliumebpf.Hash
 	PerCPUHash = ciliumebpf.PerCPUHash
@@ -25,6 +27,7 @@ const (
 	HashOfMaps = ciliumebpf.HashOfMaps
 	LPMTrie    = ciliumebpf.LPMTrie
 
+	PinNone   = ciliumebpf.PinNone
 	PinByName = ciliumebpf.PinByName
 )
 
@@ -107,7 +110,7 @@ func (m *Map) OpenOrCreate() error {
 	}
 
 	opts := ciliumebpf.MapOptions{
-		PinPath: bpf.MapPrefixPath(),
+		PinPath: bpf.TCGlobalsPath(),
 	}
 
 	m.spec.Flags = m.spec.Flags | bpf.GetPreAllocateMapFlags(bpf.MapType(m.spec.Type))

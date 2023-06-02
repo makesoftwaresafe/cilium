@@ -12,6 +12,7 @@ package metrics
 
 import (
 	"net/http"
+	"regexp"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
@@ -67,9 +68,12 @@ const (
 	// SubsystemAPILimiter is the subsystem to scope metrics related to the API limiter package.
 	SubsystemAPILimiter = "api_limiter"
 
-	// Namespace is used to scope metrics from cilium. It is prepended to metric
-	// names and separated with a '_'
-	Namespace = "cilium"
+	// CiliumAgentNamespace is used to scope metrics from the Cilium Agent
+	CiliumAgentNamespace = "cilium"
+
+	// CiliumClusterMeshAPIServerNamespace is used to scope metrics from the
+	// Cilium Cluster Mesh API Server
+	CiliumClusterMeshAPIServerNamespace = "cilium_clustermesh_apiserver"
 
 	// LabelError indicates the type of error (string)
 	LabelError = "error"
@@ -219,6 +223,13 @@ const (
 )
 
 var (
+	// Namespace is used to scope metrics from cilium. It is prepended to metric
+	// names and separated with a '_'
+	Namespace = CiliumAgentNamespace
+
+	// goCustomCollectorsRX tracks enabled go runtime metrics.
+	goCustomCollectorsRX = regexp.MustCompile(`^/sched/latencies:seconds`)
+
 	registry = prometheus.NewPedanticRegistry()
 
 	// BootstrapTimes is the durations of cilium-agent bootstrap sequence.
@@ -292,6 +303,15 @@ var (
 	// through the datapath. The longest times will roughly correlate with the
 	// time taken to fully deploy an endpoint.
 	PolicyImplementationDelay = NoOpObserverVec
+
+	// CIDRGroup
+
+	// CIDRGroupTranslationTimeStats is the time taken to translate the policy field `FromCIDRGroupRef`
+	// after the referenced CIDRGroups have been updated or deleted.
+	CIDRGroupTranslationTimeStats = NoOpHistogram
+
+	// CIDRGroupPolicies is the number of CNPs and CCNPs referencing at least one CiliumCIDRGroup.
+	CIDRGroupPolicies = NoOpGauge
 
 	// Identity
 
@@ -450,6 +470,14 @@ var (
 	// KVStoreQuorumErrors records the number of kvstore quorum errors
 	KVStoreQuorumErrors = NoOpCounterVec
 
+	// KVStoreSyncQueueSize records the number of elements queued for
+	// synchronization in the kvstore.
+	KVStoreSyncQueueSize = NoOpGaugeVec
+
+	// KVStoreInitialSyncCompleted records whether the initial synchronization
+	// from/to the kvstore has completed.
+	KVStoreInitialSyncCompleted = NoOpGaugeVec
+
 	// FQDNGarbageCollectorCleanedTotal is the number of domains cleaned by the
 	// GC job.
 	FQDNGarbageCollectorCleanedTotal = NoOpCounter
@@ -549,6 +577,8 @@ type Configuration struct {
 	PolicyChangeTotalEnabled                bool
 	PolicyEndpointStatusEnabled             bool
 	PolicyImplementationDelayEnabled        bool
+	CIDRGroupTranslationTimeStatsEnabled    bool
+	CIDRGroupPoliciesCountEnabled           bool
 	IdentityCountEnabled                    bool
 	EventTSEnabled                          bool
 	EventLagK8sEnabled                      bool
@@ -590,6 +620,8 @@ type Configuration struct {
 	KVStoreOperationsDurationEnabled        bool
 	KVStoreEventsQueueDurationEnabled       bool
 	KVStoreQuorumErrorsEnabled              bool
+	KVStoreSyncQueueSizeEnabled             bool
+	KVStoreInitialSyncCompletedEnabled      bool
 	FQDNGarbageCollectorCleanedTotalEnabled bool
 	FQDNActiveNames                         bool
 	FQDNActiveIPs                           bool
@@ -626,6 +658,7 @@ func DefaultMetrics() map[string]struct{} {
 		Namespace + "_policy_change_total":                                           {},
 		Namespace + "_policy_endpoint_enforcement_status":                            {},
 		Namespace + "_policy_implementation_delay":                                   {},
+		Namespace + "_cidrgroup_policies":                                            {},
 		Namespace + "_identity":                                                      {},
 		Namespace + "_event_ts":                                                      {},
 		Namespace + "_proxy_redirects":                                               {},
@@ -663,9 +696,12 @@ func DefaultMetrics() map[string]struct{} {
 		Namespace + "_" + SubsystemKVStore + "_operations_duration_seconds":          {},
 		Namespace + "_" + SubsystemKVStore + "_events_queue_seconds":                 {},
 		Namespace + "_" + SubsystemKVStore + "_quorum_errors_total":                  {},
+		Namespace + "_" + SubsystemKVStore + "_sync_queue_size":                      {},
+		Namespace + "_" + SubsystemKVStore + "_initial_sync_completed":               {},
 		Namespace + "_" + SubsystemIPCache + "_errors_total":                         {},
 		Namespace + "_" + SubsystemFQDN + "_gc_deletions_total":                      {},
 		Namespace + "_" + SubsystemBPF + "_map_ops_total":                            {},
+		Namespace + "_" + SubsystemBPF + "_map_pressure":                             {},
 		Namespace + "_" + SubsystemTriggers + "_policy_update_total":                 {},
 		Namespace + "_" + SubsystemTriggers + "_policy_update_folds":                 {},
 		Namespace + "_" + SubsystemTriggers + "_policy_update_call_duration_seconds": {},
@@ -826,6 +862,26 @@ func CreateConfiguration(metricsEnabled []string) (Configuration, []prometheus.C
 
 			collectors = append(collectors, PolicyImplementationDelay)
 			c.PolicyImplementationDelayEnabled = true
+
+		case Namespace + "_cidrgroup_translation_time_stats_seconds":
+			CIDRGroupTranslationTimeStats = prometheus.NewHistogram(prometheus.HistogramOpts{
+				Namespace: Namespace,
+				Name:      "cidrgroup_translation_time_stats_seconds",
+				Help:      "CIDRGroup translation time stats",
+			})
+
+			collectors = append(collectors, CIDRGroupTranslationTimeStats)
+			c.CIDRGroupTranslationTimeStatsEnabled = true
+
+		case Namespace + "_cidrgroup_policies":
+			CIDRGroupPolicies = prometheus.NewGauge(prometheus.GaugeOpts{
+				Namespace: Namespace,
+				Name:      "cidrgroup_policies",
+				Help:      "Number of CNPs and CCNPs referencing at least one CiliumCIDRGroup",
+			})
+
+			collectors = append(collectors, CIDRGroupPolicies)
+			c.CIDRGroupPoliciesCountEnabled = true
 
 		case Namespace + "_identity":
 			Identity = prometheus.NewGaugeVec(prometheus.GaugeOpts{
@@ -1201,7 +1257,7 @@ func CreateConfiguration(metricsEnabled []string) (Configuration, []prometheus.C
 				Namespace: Namespace,
 				Subsystem: SubsystemKVStore,
 				Name:      "events_queue_seconds",
-				Help:      "Duration in seconds of time received event was blocked before it could be queued",
+				Help:      "Seconds waited before a received event was queued",
 				Buckets:   []float64{.002, .005, .01, .015, .025, .05, .1, .25, .5, .75, 1},
 			}, []string{LabelScope, LabelAction})
 
@@ -1218,6 +1274,28 @@ func CreateConfiguration(metricsEnabled []string) (Configuration, []prometheus.C
 
 			collectors = append(collectors, KVStoreQuorumErrors)
 			c.KVStoreQuorumErrorsEnabled = true
+
+		case Namespace + "_" + SubsystemKVStore + "_sync_queue_size":
+			KVStoreSyncQueueSize = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+				Namespace: Namespace,
+				Subsystem: SubsystemKVStore,
+				Name:      "sync_queue_size",
+				Help:      "Number of elements queued for synchronization in the kvstore",
+			}, []string{LabelScope, LabelSourceCluster})
+
+			collectors = append(collectors, KVStoreSyncQueueSize)
+			c.KVStoreSyncQueueSizeEnabled = true
+
+		case Namespace + "_" + SubsystemKVStore + "_initial_sync_completed":
+			KVStoreInitialSyncCompleted = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+				Namespace: Namespace,
+				Subsystem: SubsystemKVStore,
+				Name:      "initial_sync_completed",
+				Help:      "Whether the initial synchronization from/to the kvstore has completed",
+			}, []string{LabelScope, LabelSourceCluster, LabelAction})
+
+			collectors = append(collectors, KVStoreInitialSyncCompleted)
+			c.KVStoreInitialSyncCompletedEnabled = true
 
 		case Namespace + "_" + SubsystemIPCache + "_errors_total":
 			IPCacheErrorsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -1560,7 +1638,10 @@ func init() {
 
 func registerDefaultMetrics() {
 	MustRegister(collectors.NewProcessCollector(collectors.ProcessCollectorOpts{Namespace: Namespace}))
-	MustRegister(collectors.NewGoCollector())
+	MustRegister(collectors.NewGoCollector(
+		collectors.WithGoCollectorRuntimeMetrics(
+			collectors.GoRuntimeMetricsRule{Matcher: goCustomCollectorsRX},
+		)))
 	MustRegister(newStatusCollector())
 	MustRegister(newbpfCollector())
 }

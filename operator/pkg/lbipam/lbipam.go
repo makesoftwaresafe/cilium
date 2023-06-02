@@ -9,12 +9,11 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"runtime/pprof"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/cilium/ipam/service/ipallocator"
-	"github.com/cilium/workerpool"
 	"github.com/sirupsen/logrus"
 	"go.uber.org/multierr"
 	"golang.org/x/exp/slices"
@@ -23,6 +22,8 @@ import (
 	"k8s.io/client-go/util/workqueue"
 
 	"github.com/cilium/cilium/pkg/hive"
+	"github.com/cilium/cilium/pkg/hive/job"
+	"github.com/cilium/cilium/pkg/ipam/service/ipallocator"
 	"github.com/cilium/cilium/pkg/k8s"
 	cilium_api_v2alpha1 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2alpha1"
 	cilium_client_v2alpha1 "github.com/cilium/cilium/pkg/k8s/client/clientset/versioned/typed/cilium.io/v2alpha1"
@@ -71,6 +72,11 @@ func newLBIPAM(params LBIPAMParams) *LBIPAM {
 		lbClasses = append(lbClasses, "io.cilium/bgp-control-plane")
 	}
 
+	jobGroup := params.JobRegistry.NewGroup(
+		job.WithLogger(params.Logger),
+		job.WithPprofLabels(pprof.Labels("cell", "lbipam")),
+	)
+
 	lbIPAM := &LBIPAM{
 		logger:       params.Logger,
 		poolResource: params.PoolResource,
@@ -84,9 +90,17 @@ func newLBIPAM(params LBIPAMParams) *LBIPAM {
 		lbClasses:    lbClasses,
 		ipv4Enabled:  option.Config.IPv4Enabled(),
 		ipv6Enabled:  option.Config.IPv6Enabled(),
+		jobGroup:     jobGroup,
 	}
 
-	params.LC.Append(lbIPAM)
+	jobGroup.Add(
+		job.OneShot("lbipam main", func(ctx context.Context) error {
+			lbIPAM.Run(ctx)
+			return nil
+		}),
+	)
+
+	params.LC.Append(jobGroup)
 
 	return lbIPAM
 }
@@ -112,27 +126,10 @@ type LBIPAM struct {
 	rangesStore  rangesStore
 	serviceStore serviceStore
 
-	workerpool *workerpool.WorkerPool
+	jobGroup job.Group
 
 	// Only used during testing.
 	initDoneCallbacks []func()
-}
-
-// Start implements hive.HookInterface
-func (ipam *LBIPAM) Start(hive.HookContext) error {
-	ipam.logger.Info("Starting LB IPAM")
-
-	ipam.workerpool = workerpool.New(1)
-
-	return ipam.workerpool.Submit("lb-ipam main", func(ctx context.Context) error {
-		ipam.Run(ctx)
-		return nil
-	})
-}
-
-// Stop implements hive.HookInterface
-func (ipam *LBIPAM) Stop(hive.HookContext) error {
-	return ipam.workerpool.Close()
 }
 
 func (ipam *LBIPAM) restart() {
@@ -144,14 +141,13 @@ func (ipam *LBIPAM) restart() {
 	ipam.serviceStore = NewServiceStore()
 
 	// Re-start the main goroutine
-	ipam.workerpool.Submit("lb-ipam main", func(ctx context.Context) error {
-		ipam.Run(ctx)
-		return nil
-	})
+	ipam.jobGroup.Add(
+		job.OneShot("lbipam main", func(ctx context.Context) error {
+			ipam.Run(ctx)
+			return nil
+		}),
+	)
 }
-
-type ipPoolEvent = resource.Event[*cilium_api_v2alpha1.CiliumLoadBalancerIPPool]
-type svcEvent = resource.Event[*slim_core_v1.Service]
 
 func (ipam *LBIPAM) Run(ctx context.Context) {
 	ctx, cancel := context.WithCancel(ctx)
@@ -360,12 +356,9 @@ func (ipam *LBIPAM) svcOnUpsert(ctx context.Context, k resource.Key, svc *slim_c
 func (ipam *LBIPAM) svcOnDelete(ctx context.Context, k resource.Key, svc *slim_core_v1.Service) error {
 	ipam.logger.Debugf("Deleted service '%s/%s'", svc.GetNamespace(), svc.GetName())
 
-	err := ipam.handleDeletedService(svc)
-	if err != nil {
-		return fmt.Errorf("handleDeletedService: %w", err)
-	}
+	ipam.handleDeletedService(svc)
 
-	err = ipam.satisfyAndUpdateCounts(ctx)
+	err := ipam.satisfyAndUpdateCounts(ctx)
 	if err != nil {
 		return fmt.Errorf("satisfyAndUpdateCounts: %w", err)
 	}
@@ -407,10 +400,7 @@ func (ipam *LBIPAM) handleUpsertService(ctx context.Context, svc *slim_core_v1.S
 
 		// Release allocations
 		for _, alloc := range sv.AllocatedIPs {
-			err := alloc.Origin.allocRange.Release(alloc.IP)
-			if err != nil {
-				return fmt.Errorf("alloc range release: %w", err)
-			}
+			alloc.Origin.allocRange.Release(alloc.IP)
 		}
 		ipam.serviceStore.Delete(sv.Key)
 
@@ -485,10 +475,7 @@ func (ipam *LBIPAM) stripInvalidAllocations(sv *ServiceView) error {
 
 		releaseAllocIP := func() error {
 			ipam.logger.Debugf("removing allocation '%s' from '%s'", alloc.IP.String(), sv.Key.String())
-			err := alloc.Origin.allocRange.Release(alloc.IP)
-			if err != nil {
-				return fmt.Errorf("Error while releasing '%s' from '%s': %w", alloc.IP, alloc.Origin.String(), err)
-			}
+			alloc.Origin.allocRange.Release(alloc.IP)
 
 			sv.AllocatedIPs = slices.Delete(sv.AllocatedIPs, allocIdx, allocIdx+1)
 			return nil
@@ -694,23 +681,18 @@ func getSVCRequestedIPs(svc *slim_core_v1.Service) []net.IP {
 	})
 }
 
-func (ipam *LBIPAM) handleDeletedService(svc *slim_core_v1.Service) error {
+func (ipam *LBIPAM) handleDeletedService(svc *slim_core_v1.Service) {
 	key := resource.NewKey(svc)
 	sv, found, _ := ipam.serviceStore.GetService(key)
 	if !found {
-		return nil
+		return
 	}
 
 	for _, alloc := range sv.AllocatedIPs {
-		err := alloc.Origin.allocRange.Release(alloc.IP)
-		if err != nil {
-			return fmt.Errorf("alloc range release: %w", err)
-		}
+		alloc.Origin.allocRange.Release(alloc.IP)
 	}
 
 	ipam.serviceStore.Delete(key)
-
-	return nil
 }
 
 // satisfyServices attempts to satisfy all unsatisfied services by allocating and assigning IP addresses
@@ -939,7 +921,7 @@ func (ipam *LBIPAM) findRangeOfIP(sv *ServiceView, ip net.IP) (lbRange *LBRange,
 		return r, false, nil
 	}
 
-	return nil, false, nil
+	return nil, foundPool, nil
 }
 
 // isResponsibleForSVC checks if LB IPAM should allocate and assign IPs or some other controller

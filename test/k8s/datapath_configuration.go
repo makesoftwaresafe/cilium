@@ -15,12 +15,16 @@ import (
 
 	. "github.com/onsi/gomega"
 
+	"github.com/cilium/cilium/pkg/defaults"
 	"github.com/cilium/cilium/test/config"
 	. "github.com/cilium/cilium/test/ginkgo-ext"
 	"github.com/cilium/cilium/test/helpers"
 )
 
 var _ = Describe("K8sDatapathConfig", func() {
+	const (
+		bpffsDir string = defaults.BPFFSRoot + "/" + defaults.TCGlobalsPath + "/"
+	)
 
 	var (
 		kubectl    *helpers.Kubectl
@@ -101,10 +105,10 @@ var _ = Describe("K8sDatapathConfig", func() {
 			// | ACK       |    ->     |    Y    | monitorAggregation=medium
 			egressPktCount := 3
 			ingressPktCount := 2
-			Eventually(func() bool {
+			Eventually(func() error {
 				monitorOutput = monitorRes.CombineOutput().Bytes()
 				return checkMonitorOutput(monitorOutput, egressPktCount, ingressPktCount)
-			}, helpers.HelperTimeout, time.Second).Should(BeTrue(), "Monitor log did not contain %d ingress and %d egress TCP notifications\n%s",
+			}, helpers.HelperTimeout, time.Second).Should(BeNil(), "Monitor log did not contain %d ingress and %d egress TCP notifications\n%s",
 				ingressPktCount, egressPktCount, monitorOutput)
 
 			helpers.WriteToReportFile(monitorOutput, monitorLog)
@@ -134,71 +138,23 @@ var _ = Describe("K8sDatapathConfig", func() {
 			// | ACK       |    ->     |    Y    | monitorAggregation=medium
 			egressPktCount := 4
 			ingressPktCount := 3
-			Eventually(func() bool {
+			Eventually(func() error {
 				monitorOutput = monitorRes.CombineOutput().Bytes()
 				return checkMonitorOutput(monitorOutput, egressPktCount, ingressPktCount)
-			}, helpers.HelperTimeout, time.Second).Should(BeTrue(), "monitor aggregation did not result in correct number of TCP notifications\n%s", monitorOutput)
+			}, helpers.HelperTimeout, time.Second).Should(BeNil(), "monitor aggregation did not result in correct number of TCP notifications\n%s", monitorOutput)
 			helpers.WriteToReportFile(monitorOutput, monitorLog)
 		})
 	})
 
 	Context("Encapsulation", func() {
-		validateBPFTunnelMap := func() {
-			By("Checking that BPF tunnels are in place")
-			ciliumPod, err := kubectl.GetCiliumPodOnNode(helpers.K8s1)
-			ExpectWithOffset(1, err).Should(BeNil(), "Unable to determine cilium pod on node %s", helpers.K8s1)
-			status := kubectl.CiliumExecMustSucceed(context.TODO(), ciliumPod, "cilium bpf tunnel list | wc -l")
-
-			// ipv4+ipv6: 2 entries for each remote node + 1 header row
-			numEntries := (kubectl.GetNumCiliumNodes()-1)*2 + 1
-			if value := helpers.HelmOverride("ipv6.enabled"); value == "false" {
-				// ipv4 only: 1 entry for each remote node + 1 header row
-				numEntries = (kubectl.GetNumCiliumNodes() - 1) + 1
-			}
-
-			Expect(status.IntOutput()).Should(Equal(numEntries), "Did not find expected number of entries in BPF tunnel map")
-		}
-
 		enableVXLANTunneling := func(options map[string]string) {
-			options["tunnel"] = "vxlan"
+			options["tunnelProtocol"] = "vxlan"
 			if helpers.RunsOnGKE() {
 				// We need to disable gke.enabled as it disables tunneling.
 				options["gke.enabled"] = "false"
 				options["endpointRoutes.enabled"] = "true"
 			}
 		}
-
-		It("Check connectivity with VXLAN encapsulation", func() {
-			options := map[string]string{}
-			enableVXLANTunneling(options)
-			deploymentManager.DeployCilium(options, DeployCiliumOptionsAndDNS)
-			validateBPFTunnelMap()
-			Expect(testPodConnectivityAcrossNodes(kubectl)).Should(BeTrue(), "Connectivity test between nodes failed")
-		}, 600)
-
-		// Geneve is currently not supported on GKE
-		SkipItIf(helpers.RunsOnGKE, "Check connectivity with Geneve encapsulation", func() {
-			deploymentManager.DeployCilium(map[string]string{
-				"tunnel": "geneve",
-			}, DeployCiliumOptionsAndDNS)
-			validateBPFTunnelMap()
-			Expect(testPodConnectivityAcrossNodes(kubectl)).Should(BeTrue(), "Connectivity test between nodes failed")
-		})
-
-		It("Check vxlan connectivity with per-endpoint routes", func() {
-			options := map[string]string{
-				"endpointRoutes.enabled": "true",
-			}
-			enableVXLANTunneling(options)
-			deploymentManager.DeployCilium(options, DeployCiliumOptionsAndDNS)
-			Expect(testPodConnectivityAcrossNodes(kubectl)).Should(BeTrue(), "Connectivity test between nodes failed")
-
-			if helpers.RunsOn419OrLaterKernel() {
-				By("Test BPF masquerade")
-				Expect(testPodHTTPToOutside(kubectl, "http://google.com", false, false, false)).
-					Should(BeTrue(), "Connectivity test to http://google.com failed")
-			}
-		})
 
 		It("Check iptables masquerading with random-fully", func() {
 			options := map[string]string{
@@ -216,94 +172,29 @@ var _ = Describe("K8sDatapathConfig", func() {
 			Expect(testPodHTTPToOutside(kubectl, "http://google.com", false, false, true)).
 				Should(BeTrue(), "IPv6 connectivity test to http://google.com failed")
 		})
-
-		It("Check iptables masquerading without random-fully", func() {
-			options := map[string]string{
-				"bpf.masquerade":       "false",
-				"enableIPv6Masquerade": "true",
-			}
-			enableVXLANTunneling(options)
-			deploymentManager.DeployCilium(options, DeployCiliumOptionsAndDNS)
-			Expect(testPodConnectivityAcrossNodes(kubectl)).Should(BeTrue(), "Connectivity test between nodes failed")
-
-			By("Test iptables masquerading")
-			Expect(testPodHTTPToOutside(kubectl, "http://google.com", false, false, false)).
-				Should(BeTrue(), "IPv4 connectivity test to http://google.com failed")
-			Expect(testPodHTTPToOutside(kubectl, "http://google.com", false, false, true)).
-				Should(BeTrue(), "IPv6 connectivity test to http://google.com failed")
-		})
-	})
-
-	// DirectRouting without AutoDirectNodeRoutes not supported outside of GKE.
-	SkipContextIf(helpers.DoesNotRunOnGKE, "DirectRouting", func() {
-		It("Check connectivity with direct routing", func() {
-			deploymentManager.DeployCilium(map[string]string{
-				"tunnel":                 "disabled",
-				"k8s.requireIPv4PodCIDR": "true",
-				"endpointRoutes.enabled": "false",
-			}, DeployCiliumOptionsAndDNS)
-
-			Expect(testPodConnectivityAcrossNodes(kubectl)).Should(BeTrue(), "Connectivity test between nodes failed")
-		})
-
-		It("Check connectivity with direct routing and endpointRoutes", func() {
-			deploymentManager.DeployCilium(map[string]string{
-				"tunnel":                 "disabled",
-				"k8s.requireIPv4PodCIDR": "true",
-				"endpointRoutes.enabled": "true",
-			}, DeployCiliumOptionsAndDNS)
-
-			Expect(testPodConnectivityAcrossNodes(kubectl)).Should(BeTrue(), "Connectivity test between nodes failed")
-		})
-	})
-
-	Context("AutoDirectNodeRoutes", func() {
-		BeforeEach(func() {
-			SkipIfIntegration(helpers.CIIntegrationGKE)
-			SkipIfIntegration(helpers.CIIntegrationAKS)
-		})
-
-		It("Check connectivity with automatic direct nodes routes", func() {
-			deploymentManager.DeployCilium(map[string]string{
-				"tunnel":               "disabled",
-				"autoDirectNodeRoutes": "true",
-			}, DeployCiliumOptionsAndDNS)
-
-			Expect(testPodConnectivityAcrossNodes(kubectl)).Should(BeTrue(), "Connectivity test between nodes failed")
-			if helpers.RunsOn419OrLaterKernel() {
-				By("Test BPF masquerade")
-				Expect(testPodHTTPToOutside(kubectl, "http://google.com", false, false, false)).
-					Should(BeTrue(), "Connectivity test to http://google.com failed")
-			}
-		})
-
-		It("Check direct connectivity with per endpoint routes", func() {
-			deploymentManager.DeployCilium(map[string]string{
-				"tunnel":                 "disabled",
-				"autoDirectNodeRoutes":   "true",
-				"endpointRoutes.enabled": "true",
-				"ipv6.enabled":           "false",
-			}, DeployCiliumOptionsAndDNS)
-
-			Expect(testPodConnectivityAcrossNodes(kubectl)).Should(BeTrue(), "Connectivity test between nodes failed")
-		})
 	})
 
 	SkipContextIf(func() bool {
-		return helpers.RunsWithKubeProxyReplacement() || helpers.GetCurrentIntegration() != "" || helpers.SkipQuarantined()
+		return helpers.RunsWithKubeProxyReplacement() || helpers.GetCurrentIntegration() != ""
 	}, "IPv6 masquerading", func() {
 		var (
 			k8s1EndpointIPs map[string]string
+			testDSK8s1IPv6  string = "fd03::310"
 
-			testDSK8s1IPv6 string = "fd03::310"
+			demoYAML string
 		)
 
 		BeforeAll(func() {
 			deploymentManager.DeployCilium(map[string]string{
-				"tunnel":                "disabled",
+				"routingMode":           "native",
 				"autoDirectNodeRoutes":  "true",
 				"ipv6NativeRoutingCIDR": helpers.IPv6NativeRoutingCIDR,
 			}, DeployCiliumOptionsAndDNS)
+
+			demoYAML = helpers.ManifestGet(kubectl.BasePath(), "demo_ds.yaml")
+			res := kubectl.ApplyDefault(demoYAML)
+			Expect(res).Should(helpers.CMDSuccess(), "Unable to apply %s", demoYAML)
+			waitPodsDs(kubectl, []string{testDS, testDSClient, testDSK8s2})
 
 			pod, err := kubectl.GetCiliumPodOnNode(helpers.K8s1)
 			Expect(err).Should(BeNil(), "Cannot get cilium pod on node %s", helpers.K8s1)
@@ -364,6 +255,7 @@ var _ = Describe("K8sDatapathConfig", func() {
 
 		AfterAll(func() {
 			ciliumDelService(kubectl, 31080)
+			_ = kubectl.Delete(demoYAML)
 		})
 	})
 
@@ -418,7 +310,7 @@ var _ = Describe("K8sDatapathConfig", func() {
 		It("DirectRouting", func() {
 			deploymentManager.DeployCilium(map[string]string{
 				"ipMasqAgent.enabled":                   "true",
-				"tunnel":                                "disabled",
+				"routingMode":                           "native",
 				"autoDirectNodeRoutes":                  "true",
 				"ipMasqAgent.config.nonMasqueradeCIDRs": fmt.Sprintf("{%s/32}", nodeIP),
 			}, DeployCiliumOptionsAndDNS)
@@ -429,7 +321,7 @@ var _ = Describe("K8sDatapathConfig", func() {
 		It("VXLAN", func() {
 			deploymentManager.DeployCilium(map[string]string{
 				"ipMasqAgent.enabled":                   "true",
-				"tunnel":                                "vxlan",
+				"tunnelProtocol":                        "vxlan",
 				"ipMasqAgent.config.nonMasqueradeCIDRs": fmt.Sprintf("{%s/32}", nodeIP),
 			}, DeployCiliumOptionsAndDNS)
 
@@ -456,7 +348,7 @@ var _ = Describe("K8sDatapathConfig", func() {
 
 			deploymentManager.Deploy(helpers.CiliumNamespace, IPSecSecret)
 			deploymentManager.DeployCilium(map[string]string{
-				"tunnel":                     "disabled",
+				"routingMode":                "native",
 				"autoDirectNodeRoutes":       "true",
 				"encryption.enabled":         "true",
 				"encryption.ipsec.interface": privateIface,
@@ -503,14 +395,18 @@ var _ = Describe("K8sDatapathConfig", func() {
 	Context("Host firewall", func() {
 		BeforeAll(func() {
 			kubectl.Exec("kubectl label nodes --all status=lockdown")
+
+			// Need to install Cilium w/ host fw prior to the host policy preparation
+			// step.
+			deploymentManager.DeployCilium(map[string]string{
+				"hostFirewall.enabled": "true",
+			}, DeployCiliumOptionsAndDNS)
+
+			prepareHostPolicyEnforcement(kubectl)
 		})
 
 		AfterAll(func() {
 			kubectl.Exec("kubectl label nodes --all status-")
-		})
-
-		AfterEach(func() {
-			kubectl.Exec(fmt.Sprintf("%s delete --all ccnp", helpers.KubectlCmd))
 		})
 
 		SkipItIf(func() bool {
@@ -530,7 +426,7 @@ var _ = Describe("K8sDatapathConfig", func() {
 			}
 			if helpers.RunsOnGKE() {
 				options["gke.enabled"] = "false"
-				options["tunnel"] = "vxlan"
+				options["tunnelProtocol"] = "vxlan"
 			}
 			deploymentManager.DeployCilium(options, DeployCiliumOptionsAndDNS)
 			testHostFirewall(kubectl)
@@ -545,7 +441,7 @@ var _ = Describe("K8sDatapathConfig", func() {
 			}
 			if helpers.RunsOnGKE() {
 				options["gke.enabled"] = "false"
-				options["tunnel"] = "vxlan"
+				options["tunnelProtocol"] = "vxlan"
 			}
 			deploymentManager.DeployCilium(options, DeployCiliumOptionsAndDNS)
 			testHostFirewall(kubectl)
@@ -554,7 +450,7 @@ var _ = Describe("K8sDatapathConfig", func() {
 		It("With native routing", func() {
 			options := map[string]string{
 				"hostFirewall.enabled": "true",
-				"tunnel":               "disabled",
+				"routingMode":          "native",
 			}
 			// We don't want to run with per-endpoint routes (enabled by
 			// gke.enabled) for this test.
@@ -570,7 +466,7 @@ var _ = Describe("K8sDatapathConfig", func() {
 		It("With native routing and endpoint routes", func() {
 			options := map[string]string{
 				"hostFirewall.enabled":   "true",
-				"tunnel":                 "disabled",
+				"routingMode":            "native",
 				"endpointRoutes.enabled": "true",
 			}
 			if !helpers.RunsOnGKE() {
@@ -581,12 +477,61 @@ var _ = Describe("K8sDatapathConfig", func() {
 		})
 	})
 
+	SkipContextIf(func() bool {
+		return helpers.SkipQuarantined() || helpers.DoesNotRunOnNetNextKernel()
+	}, "High-scale IPcache", func() {
+		const hsIPcacheFile = "high-scale-ipcache.yaml"
+
+		AfterEach(func() {
+			hsIPcacheYAML := helpers.ManifestGet(kubectl.BasePath(), hsIPcacheFile)
+			_ = kubectl.Delete(hsIPcacheYAML)
+		})
+
+		testHighScaleIPcache := func(tunnelProto string, epRoutesConfig string) {
+			options := map[string]string{
+				"highScaleIPcache.enabled":    "true",
+				"routingMode":                 "native",
+				"bpf.monitorAggregation":      "none",
+				"ipv6.enabled":                "false",
+				"wellKnownIdentities.enabled": "true",
+				"tunnelProtocol":              tunnelProto,
+				"endpointRoutes.enabled":      epRoutesConfig,
+			}
+			if !helpers.RunsOnGKE() {
+				options["autoDirectNodeRoutes"] = "true"
+			}
+			if helpers.RunsWithKubeProxy() {
+				options["kubeProxyReplacement"] = "disabled"
+			}
+			deploymentManager.DeployCilium(options, DeployCiliumOptionsAndDNS)
+
+			cmd := fmt.Sprintf("bpftool map update pinned %scilium_world_cidrs4 key 0 0 0 0 0 0 0 0 value 1", bpffsDir)
+			kubectl.CiliumExecMustSucceedOnAll(context.TODO(), cmd)
+
+			hsIPcacheYAML := helpers.ManifestGet(kubectl.BasePath(), hsIPcacheFile)
+			kubectl.Create(hsIPcacheYAML).ExpectSuccess("Unable to create resource %q", hsIPcacheYAML)
+
+			// We need a longer timeout here because of the larger number of
+			// pods that need to be deployed.
+			err := kubectl.WaitforPods(helpers.DefaultNamespace, "-l type=client", 2*helpers.HelperTimeout)
+			Expect(err).ToNot(HaveOccurred(), "Client pods not ready after timeout")
+		}
+
+		It("Test ingress policy enforcement with VXLAN and no endpoint routes", func() {
+			testHighScaleIPcache("vxlan", "false")
+		})
+
+		It("Test ingress policy enforcement with GENEVE and endpoint routes", func() {
+			testHighScaleIPcache("geneve", "true")
+		})
+	})
+
 	Context("Iptables", func() {
 		SkipItIf(func() bool {
-			return helpers.IsIntegration(helpers.CIIntegrationGKE) || helpers.DoesNotRunWithKubeProxyReplacement() || helpers.SkipQuarantined()
+			return helpers.IsIntegration(helpers.CIIntegrationGKE) || helpers.DoesNotRunWithKubeProxyReplacement()
 		}, "Skip conntrack for pod traffic", func() {
 			deploymentManager.DeployCilium(map[string]string{
-				"tunnel":                          "disabled",
+				"routingMode":                     "native",
 				"autoDirectNodeRoutes":            "true",
 				"installNoConntrackIptablesRules": "true",
 			}, DeployCiliumOptionsAndDNS)
@@ -594,34 +539,75 @@ var _ = Describe("K8sDatapathConfig", func() {
 			ciliumPod, err := kubectl.GetCiliumPodOnNode(helpers.K8s1)
 			ExpectWithOffset(1, err).Should(BeNil(), "Unable to determine cilium pod on node %s", helpers.K8s1)
 
-			res := kubectl.ExecPodCmd(helpers.CiliumNamespace, ciliumPod, "sh -c 'apt update && apt install -y conntrack && conntrack -F'")
-			Expect(res.WasSuccessful()).Should(BeTrue(), "Cannot flush conntrack table")
+			res := kubectl.ExecInHostNetNS(context.TODO(), helpers.K8s1, "conntrack -F")
+			res.ExpectSuccess("Cannot flush conntrack table")
 
 			Expect(testPodConnectivityAcrossNodes(kubectl)).Should(BeTrue(), "Connectivity test between nodes failed")
 
 			cmd := fmt.Sprintf("iptables -w 60 -t raw -C CILIUM_PRE_raw -s %s -m comment --comment 'cilium: NOTRACK for pod traffic' -j CT --notrack", helpers.IPv4NativeRoutingCIDR)
 			res = kubectl.ExecPodCmd(helpers.CiliumNamespace, ciliumPod, cmd)
-			Expect(res.WasSuccessful()).Should(BeTrue(), "Missing '-j CT --notrack' iptables rule")
+			res.ExpectSuccess("Missing '-j CT --notrack' iptables rule")
 
 			cmd = fmt.Sprintf("iptables -w 60 -t raw -C CILIUM_PRE_raw -d %s -m comment --comment 'cilium: NOTRACK for pod traffic' -j CT --notrack", helpers.IPv4NativeRoutingCIDR)
 			res = kubectl.ExecPodCmd(helpers.CiliumNamespace, ciliumPod, cmd)
-			Expect(res.WasSuccessful()).Should(BeTrue(), "Missing '-j CT --notrack' iptables rule")
+			res.ExpectSuccess("Missing '-j CT --notrack' iptables rule")
 
 			cmd = fmt.Sprintf("iptables -w 60 -t raw -C CILIUM_OUTPUT_raw -s %s -m comment --comment 'cilium: NOTRACK for pod traffic' -j CT --notrack", helpers.IPv4NativeRoutingCIDR)
 			res = kubectl.ExecPodCmd(helpers.CiliumNamespace, ciliumPod, cmd)
-			Expect(res.WasSuccessful()).Should(BeTrue(), "Missing '-j CT --notrack' iptables rule")
+			res.ExpectSuccess("Missing '-j CT --notrack' iptables rule")
 
 			cmd = fmt.Sprintf("iptables -w 60 -t raw -C CILIUM_OUTPUT_raw -d %s -m comment --comment 'cilium: NOTRACK for pod traffic' -j CT --notrack", helpers.IPv4NativeRoutingCIDR)
 			res = kubectl.ExecPodCmd(helpers.CiliumNamespace, ciliumPod, cmd)
-			Expect(res.WasSuccessful()).Should(BeTrue(), "Missing '-j CT --notrack' iptables rule")
+			res.ExpectSuccess("Missing '-j CT --notrack' iptables rule")
 
 			cmd = fmt.Sprintf("conntrack -L -s %s -d %s | wc -l", helpers.IPv4NativeRoutingCIDR, helpers.IPv4NativeRoutingCIDR)
-			res = kubectl.ExecPodCmd(helpers.CiliumNamespace, ciliumPod, cmd)
-			Expect(res.WasSuccessful()).Should(BeTrue(), "Cannot list conntrack entries")
+			res = kubectl.ExecInHostNetNS(context.TODO(), helpers.K8s1, cmd)
+			res.ExpectSuccess("Cannot list conntrack entries")
 			Expect(strings.TrimSpace(res.Stdout())).To(Equal("0"), "Unexpected conntrack entries")
 		})
 	})
 })
+
+// To avoid flakes, we need to perform some prep work before we enable host
+// policy enforcement.
+//
+// When we first enable the host firewall, Cilium will for the first time track
+// all hostns connections on all nodes. Because those connections are already
+// established, the first packet we see from them may be a reply packet. For
+// that reason, it's possible for Cilium to create conntrack entries in the
+// wrong direction. As a consequence, once host policies are enforced, we will
+// allow the forward path through and enforce policies on replies.
+// For example, consider a connection to the kube-apiserver, a:52483 -> b:6443.
+// If the first packet we track is the SYN+ACK, we will create a conntrack
+// entry TCP OUT b:6443 -> a:52483. All traffic a:52483 -> b:6443 will be
+// considered reply traffic and we will enforce policies on b:6443 -> a:52483.
+// If there are any L4 policy rules, this 52483 destination port is unlikely to
+// be allowed through.
+//
+// That situation unfortunately doesn't resolve on its own because Linux will
+// consider the connections to be in LAST-ACK state on the server side and will
+// keep them around indefinitely.
+//
+// To fix that, we need to force the termination of those connections. One way
+// to do that is to enforce policies just long enough that all such connections
+// will end up in a closing state (LAST-ACK or TIME-WAIT). Once that is the
+// case, we remove the policies to allow everything through and enable proper
+// termination of those connections.
+// This function implements that process.
+func prepareHostPolicyEnforcement(kubectl *helpers.Kubectl) {
+	demoHostPolicies := helpers.ManifestGet(kubectl.BasePath(), "host-policies.yaml")
+	By(fmt.Sprintf("Applying policies %s for 1min", demoHostPolicies))
+	_, err := kubectl.CiliumClusterwidePolicyAction(demoHostPolicies, helpers.KubectlApply, helpers.HelperTimeout)
+	ExpectWithOffset(1, err).Should(BeNil(), fmt.Sprintf("Error creating resource %s: %s", demoHostPolicies, err))
+
+	time.Sleep(1 * time.Minute)
+
+	_, err = kubectl.CiliumClusterwidePolicyAction(demoHostPolicies, helpers.KubectlDelete, helpers.HelperTimeout)
+	ExpectWithOffset(1, err).Should(BeNil(), fmt.Sprintf("Error deleting resource %s: %s", demoHostPolicies, err))
+
+	By("Deleted the policies, waiting for connection terminations")
+	time.Sleep(30 * time.Second)
+}
 
 func testHostFirewall(kubectl *helpers.Kubectl) {
 	randomNs := deploymentManager.DeployRandomNamespaceShared(DemoHostFirewall)
@@ -631,6 +617,10 @@ func testHostFirewall(kubectl *helpers.Kubectl) {
 	By(fmt.Sprintf("Applying policies %s", demoHostPolicies))
 	_, err := kubectl.CiliumClusterwidePolicyAction(demoHostPolicies, helpers.KubectlApply, helpers.HelperTimeout)
 	ExpectWithOffset(1, err).Should(BeNil(), fmt.Sprintf("Error creating resource %s: %s", demoHostPolicies, err))
+	defer func() {
+		_, err := kubectl.CiliumClusterwidePolicyAction(demoHostPolicies, helpers.KubectlDelete, helpers.HelperTimeout)
+		ExpectWithOffset(1, err).Should(BeNil(), fmt.Sprintf("Error deleting resource %s: %s", demoHostPolicies, err))
+	}()
 
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -752,18 +742,24 @@ func fetchPodsWithOffset(kubectl *helpers.Kubectl, namespace, name, filter, host
 	return targetPod, targetPodJSON
 }
 
-func applyL3Policy(kubectl *helpers.Kubectl, ns string) {
+func applyL3Policy(kubectl *helpers.Kubectl, ns string) (withdrawPolicy func()) {
 	demoPolicyL3 := helpers.ManifestGet(kubectl.BasePath(), "l3-policy-demo.yaml")
 	By(fmt.Sprintf("Applying policy %s", demoPolicyL3))
 	_, err := kubectl.CiliumPolicyAction(ns, demoPolicyL3, helpers.KubectlApply, helpers.HelperTimeout)
 	ExpectWithOffset(1, err).Should(BeNil(), fmt.Sprintf("Error creating resource %s: %s", demoPolicyL3, err))
+
+	return func() {
+		_, err := kubectl.CiliumPolicyAction(ns, demoPolicyL3, helpers.KubectlDelete, helpers.HelperTimeout)
+		ExpectWithOffset(1, err).Should(BeNil(), fmt.Sprintf("Error deleting resource %s: %s", demoPolicyL3, err))
+	}
 }
 
 func testPodConnectivityAndReturnIP(kubectl *helpers.Kubectl, requireMultiNode bool, callOffset int) (bool, string) {
 	callOffset++
 
 	randomNamespace := deploymentManager.DeployRandomNamespaceShared(DemoDaemonSet)
-	applyL3Policy(kubectl, randomNamespace)
+	withdrawPolicy := applyL3Policy(kubectl, randomNamespace)
+	defer withdrawPolicy()
 	deploymentManager.WaitUntilReady()
 
 	By("Checking pod connectivity between nodes")
@@ -800,7 +796,8 @@ func testPodHTTPToOutside(kubectl *helpers.Kubectl, outsideURL string, expectNod
 	}
 
 	namespace := deploymentManager.DeployRandomNamespaceShared(DemoDaemonSet)
-	applyL3Policy(kubectl, namespace)
+	withdrawPolicy := applyL3Policy(kubectl, namespace)
+	defer withdrawPolicy()
 	deploymentManager.WaitUntilReady()
 
 	label := "zgroup=testDSClient"
@@ -878,7 +875,7 @@ func monitorConnectivityAcrossNodes(kubectl *helpers.Kubectl) (monitorRes *helpe
 	return monitorRes, monitorCancel, targetIP
 }
 
-func checkMonitorOutput(monitorOutput []byte, egressPktCount, ingressPktCount int) bool {
+func checkMonitorOutput(monitorOutput []byte, egressPktCount, ingressPktCount int) error {
 	// Multiple connection attempts may be made, we need to
 	// narrow down to the last connection close, then match
 	// the ephemeral port + flags to ensure that the
@@ -886,9 +883,8 @@ func checkMonitorOutput(monitorOutput []byte, egressPktCount, ingressPktCount in
 	egressTCPExpr := `TCP.*DstPort=80.*FIN=true`
 	egressTCPRegex := regexp.MustCompile(egressTCPExpr)
 	egressTCPMatches := egressTCPRegex.FindAll(monitorOutput, -1)
-	if len(egressTCPMatches) <= 0 {
-		GinkgoPrint("Could not locate final FIN notification in monitor log: egressTCPMatches %+v", egressTCPMatches)
-		return false
+	if len(egressTCPMatches) == 0 {
+		return fmt.Errorf("could not locate TCP FIN in monitor log")
 	}
 	finalMatch := egressTCPMatches[len(egressTCPMatches)-1]
 	portRegex := regexp.MustCompile(`SrcPort=([0-9]*)`)
@@ -898,25 +894,25 @@ func checkMonitorOutput(monitorOutput []byte, egressPktCount, ingressPktCount in
 	By("Looking for TCP notifications using the ephemeral port %q", portBytes)
 	port, err := strconv.Atoi(string(portBytes))
 	if err != nil {
-		GinkgoPrint("ephemeral port %q could not be converted to integer: %s", string(portBytes), err)
-		return false
+		return fmt.Errorf("ephemeral port %q could not be converted to integer: %s",
+			string(portBytes), err)
 	}
 
 	expEgress := fmt.Sprintf("SrcPort=%d", port)
 	expEgressRegex := regexp.MustCompile(expEgress)
 	egressMatches := expEgressRegex.FindAllIndex(monitorOutput, -1)
 	if len(egressMatches) != egressPktCount {
-		GinkgoPrint("Could not locate final FIN notification in monitor log: egressTCPMatches %+v", egressTCPMatches)
-		return false
+		return fmt.Errorf("monitor logs contained unexpected number (%d) of egress notifications matching %q",
+			len(egressMatches), expEgress)
 	}
 
 	expIngress := fmt.Sprintf("DstPort=%d", port)
 	expIngressRegex := regexp.MustCompile(expIngress)
 	ingressMatches := expIngressRegex.FindAllIndex(monitorOutput, -1)
 	if len(ingressMatches) != ingressPktCount {
-		GinkgoPrint("Monitor log contained unexpected number of ingress notifications matching %q", expIngress)
-		return false
+		return fmt.Errorf("monitor log contained unexpected number (%d) of ingress notifications matching %q",
+			len(ingressMatches), expIngress)
 	}
 
-	return true
+	return nil
 }

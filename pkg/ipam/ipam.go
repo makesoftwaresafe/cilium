@@ -102,12 +102,16 @@ type MtuConfiguration interface {
 	GetDeviceMTU() int
 }
 
+type Metadata interface {
+	GetIPPoolForPod(owner string) (pool string, err error)
+}
+
 // NewIPAM returns a new IP address manager
 func NewIPAM(nodeAddressing types.NodeAddressing, c Configuration, owner Owner, k8sEventReg K8sEventRegister, mtuConfig MtuConfiguration, clientset client.Clientset) *IPAM {
 	ipam := &IPAM{
 		nodeAddressing:   nodeAddressing,
 		config:           c,
-		owner:            map[string]string{},
+		owner:            map[Pool]map[string]string{},
 		expirationTimers: map[string]string{},
 		excludedIPs:      map[string]string{},
 	}
@@ -135,6 +139,16 @@ func NewIPAM(nodeAddressing types.NodeAddressing, c Configuration, owner Owner, 
 		if c.IPv4Enabled() {
 			ipam.IPv4Allocator = newClusterPoolAllocator(IPv4, c, owner, k8sEventReg, clientset)
 		}
+	case ipamOption.IPAMMultiPool:
+		log.Info("Initializing MultiPool IPAM")
+		manager := newMultiPoolManager(c, k8sEventReg, owner, clientset.CiliumV2().CiliumNodes())
+
+		if c.IPv6Enabled() {
+			ipam.IPv6Allocator = manager.Allocator(IPv6)
+		}
+		if c.IPv4Enabled() {
+			ipam.IPv4Allocator = manager.Allocator(IPv4)
+		}
 	case ipamOption.IPAMCRD, ipamOption.IPAMENI, ipamOption.IPAMAzure, ipamOption.IPAMAlibabaCloud:
 		log.Info("Initializing CRD-based IPAM")
 		if c.IPv6Enabled() {
@@ -159,17 +173,62 @@ func NewIPAM(nodeAddressing types.NodeAddressing, c Configuration, owner Owner, 
 	return ipam
 }
 
+// WithMetadata sets an optional Metadata provider, which IPAM will use to
+// determine what IPAM pool an IP owner should allocate its IP from
+func (ipam *IPAM) WithMetadata(m Metadata) {
+	ipam.metadata = m
+}
+
+// getIPOwner returns the owner for an IP in a particular pool or the empty
+// string in case the pool or IP is not registered.
+func (ipam *IPAM) getIPOwner(ip string, pool Pool) string {
+	if p, ok := ipam.owner[pool]; ok {
+		return p[ip]
+	}
+	return ""
+}
+
+// registerIPOwner registers a new owner for an IP in a particular pool.
+func (ipam *IPAM) registerIPOwner(ip net.IP, owner string, pool Pool) {
+	if _, ok := ipam.owner[pool]; !ok {
+		ipam.owner[pool] = make(map[string]string)
+	}
+	ipam.owner[pool][ip.String()] = owner
+}
+
+// releaseIPOwner releases ip from pool and returns the previous owner.
+func (ipam *IPAM) releaseIPOwner(ip net.IP, pool Pool) string {
+	var owner string
+	if m, ok := ipam.owner[pool]; ok {
+		ipStr := ip.String()
+		owner = m[ipStr]
+		delete(m, ipStr)
+		if len(m) == 0 {
+			delete(ipam.owner, pool)
+		}
+	}
+	return owner
+}
+
 // ExcludeIP ensures that a certain IP is never allocated. It is preferred to
 // use this method instead of allocating the IP as the allocation block can
 // change and suddenly cover the IP to be excluded.
-func (ipam *IPAM) ExcludeIP(ip net.IP, owner string) {
+func (ipam *IPAM) ExcludeIP(ip net.IP, owner string, pool Pool) {
 	ipam.allocatorMutex.Lock()
-	ipam.excludedIPs[ip.String()] = owner
+	ipam.excludedIPs[pool.String()+":"+ip.String()] = owner
 	ipam.allocatorMutex.Unlock()
 }
 
 // isIPExcluded is used to check if a particular IP is excluded from being allocated.
-func (ipam *IPAM) isIPExcluded(ip net.IP) bool {
-	_, ok := ipam.excludedIPs[ip.String()]
-	return ok
+func (ipam *IPAM) isIPExcluded(ip net.IP, pool Pool) (string, bool) {
+	owner, ok := ipam.excludedIPs[pool.String()+":"+ip.String()]
+	return owner, ok
+}
+
+// PoolOrDefault returns the default pool if no pool is specified.
+func PoolOrDefault(pool string) Pool {
+	if pool == "" {
+		return PoolDefault
+	}
+	return Pool(pool)
 }

@@ -34,7 +34,7 @@ import (
 	"github.com/cilium/cilium/pkg/fqdn/re"
 	"github.com/cilium/cilium/pkg/identity"
 	secIDCache "github.com/cilium/cilium/pkg/identity/cache"
-	"github.com/cilium/cilium/pkg/ip"
+	ippkg "github.com/cilium/cilium/pkg/ip"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/metrics"
 	"github.com/cilium/cilium/pkg/option"
@@ -196,8 +196,7 @@ func (d *Daemon) bootstrapFQDN(possibleEndpoints map[uint16]*endpoint.Endpoint, 
 		RunInterval: dnsGCJobInterval,
 		DoFunc: func(ctx context.Context) error {
 			var (
-				GCStart      = time.Now()
-				namesToClean []string
+				GCStart = time.Now()
 
 				// activeConnections holds DNSName -> single IP entries that have been
 				// marked active by the CT GC. Since we expire in this controller, we
@@ -206,6 +205,7 @@ func (d *Daemon) bootstrapFQDN(possibleEndpoints map[uint16]*endpoint.Endpoint, 
 				activeConnectionsTTL = int(2 * dnsGCJobInterval.Seconds())
 				activeConnections    = fqdn.NewDNSCache(activeConnectionsTTL)
 			)
+			namesToClean := make(map[string]struct{})
 
 			// Cleanup each endpoint cache, deferring deletions via DNSZombies.
 			endpoints := d.endpointManager.GetEndpoints()
@@ -220,7 +220,12 @@ func (d *Daemon) bootstrapFQDN(possibleEndpoints map[uint16]*endpoint.Endpoint, 
 						metrics.FQDNActiveIPs.WithLabelValues(epID).Set(float64(countIPs))
 					}
 				}
-				namesToClean = append(namesToClean, ep.DNSHistory.GC(GCStart, ep.DNSZombies)...)
+				affectedNames := ep.DNSHistory.GC(GCStart, ep.DNSZombies)
+				for _, name := range affectedNames {
+					if _, found := namesToClean[name]; !found {
+						namesToClean[name] = struct{}{}
+					}
+				}
 				alive, dead := ep.DNSZombies.GC()
 				if option.Config.MetricsConfig.FQDNActiveZombiesConnections {
 					metrics.FQDNAliveZombieConnections.WithLabelValues(epID).Set(float64(len(alive)))
@@ -240,8 +245,10 @@ func (d *Daemon) bootstrapFQDN(possibleEndpoints map[uint16]*endpoint.Endpoint, 
 				//
 				lookupTime := time.Now()
 				for _, zombie := range alive {
-					namesToClean = fqdn.KeepUniqueNames(append(namesToClean, zombie.Names...))
 					for _, name := range zombie.Names {
+						if _, found := namesToClean[name]; !found {
+							namesToClean[name] = struct{}{}
+						}
 						activeConnections.Update(lookupTime, name, []netip.Addr{zombie.IP}, activeConnectionsTTL)
 					}
 				}
@@ -250,11 +257,14 @@ func (d *Daemon) bootstrapFQDN(possibleEndpoints map[uint16]*endpoint.Endpoint, 
 				// Entries here have been evicted from the DNS cache (via .GC due to
 				// TTL expiration or overlimit) and are no longer active connections.
 				for _, zombie := range dead {
-					namesToClean = fqdn.KeepUniqueNames(append(namesToClean, zombie.Names...))
+					for _, name := range zombie.Names {
+						if _, found := namesToClean[name]; !found {
+							namesToClean[name] = struct{}{}
+						}
+					}
 				}
 			}
 
-			namesToClean = fqdn.KeepUniqueNames(namesToClean)
 			if len(namesToClean) == 0 {
 				return nil
 			}
@@ -271,18 +281,24 @@ func (d *Daemon) bootstrapFQDN(possibleEndpoints map[uint16]*endpoint.Endpoint, 
 			for _, ep := range endpoints {
 				caches = append(caches, ep.DNSHistory)
 			}
-			cfg.Cache.ReplaceFromCacheByNames(namesToClean, caches...)
 
-			metrics.FQDNGarbageCollectorCleanedTotal.Add(float64(len(namesToClean)))
-			_, err := d.dnsNameManager.ForceGenerateDNS(context.TODO(), namesToClean)
-			namesCount := len(namesToClean)
+			namesToCleanSlice := make([]string, 0, len(namesToClean))
+			for name := range namesToClean {
+				namesToCleanSlice = append(namesToCleanSlice, name)
+			}
+
+			cfg.Cache.ReplaceFromCacheByNames(namesToCleanSlice, caches...)
+
+			metrics.FQDNGarbageCollectorCleanedTotal.Add(float64(len(namesToCleanSlice)))
+			_, err := d.dnsNameManager.ForceGenerateDNS(context.TODO(), namesToCleanSlice)
+			namesCount := len(namesToCleanSlice)
 			// Limit the amount of info level logging to some sane amount
 			if namesCount > 20 {
 				// namedsToClean is only used for logging after this so we can reslice it in place
-				namesToClean = namesToClean[:20]
+				namesToCleanSlice = namesToCleanSlice[:20]
 			}
 			log.WithField(logfields.Controller, dnsGCJobName).Infof(
-				"FQDN garbage collector work deleted %d name entries: %s", namesCount, strings.Join(namesToClean, ","))
+				"FQDN garbage collector work deleted %d name entries: %s", namesCount, strings.Join(namesToCleanSlice, ","))
 			return err
 		},
 		Context: d.ctx,
@@ -347,8 +363,12 @@ func (d *Daemon) bootstrapFQDN(possibleEndpoints map[uint16]*endpoint.Endpoint, 
 	if option.Config.ToFQDNsProxyPort != 0 {
 		port = uint16(option.Config.ToFQDNsProxyPort)
 	} else if port == 0 {
-		// Try locate old DNS proxy port number from the datapath
-		port = d.datapath.GetProxyPort(proxy.DNSProxyName)
+		// Try locate old DNS proxy port number from the datapath, and reuse it if it's not open
+		oldPort := d.datapath.GetProxyPort(proxy.DNSProxyName)
+		openLocalPorts := proxy.OpenLocalPorts()
+		if _, alreadyOpen := openLocalPorts[oldPort]; !alreadyOpen {
+			port = oldPort
+		}
 	}
 	if err := re.InitRegexCompileLRU(option.Config.FQDNRegexCompileLRUSize); err != nil {
 		return fmt.Errorf("could not initialize regex LRU cache: %w", err)
@@ -398,7 +418,11 @@ func (d *Daemon) updateSelectors(ctx context.Context, selectorWithIPsToUpdate ma
 
 // lookupEPByIP returns the endpoint that this IP belongs to
 func (d *Daemon) lookupEPByIP(endpointIP net.IP) (endpoint *endpoint.Endpoint, err error) {
-	e := d.endpointManager.LookupIP(endpointIP)
+	endpointAddr, ok := ippkg.AddrFromIP(endpointIP)
+	if !ok {
+		return nil, fmt.Errorf("invalid IP %s for endpoint lookup", endpointIP)
+	}
+	e := d.endpointManager.LookupIP(endpointAddr)
 	if e == nil {
 		return nil, fmt.Errorf("Cannot find endpoint with IP %s", endpointIP.String())
 	}
@@ -581,7 +605,7 @@ func (d *Daemon) notifyOnDNSMsg(lookupTime time.Time, ep *endpoint.Endpoint, epI
 		// doesn't happen in the case, we play it safe and don't purge the zombie
 		// in case of races.
 		log.WithField(logfields.EndpointID, ep.ID).Debug("Recording DNS lookup in endpoint specific cache")
-		if updated := ep.DNSHistory.Update(lookupTime, qname, ip.MustAddrsFromIPs(responseIPs), int(TTL)); updated {
+		if updated := ep.DNSHistory.Update(lookupTime, qname, ippkg.MustAddrsFromIPs(responseIPs), int(TTL)); updated {
 			ep.DNSZombies.ForceExpireByNameIP(lookupTime, qname, responseIPs...)
 			ep.SyncEndpointHeaderFile()
 		}

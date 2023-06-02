@@ -58,8 +58,7 @@ fib_redirect(struct __ctx_buff *ctx, const bool needs_l2_check,
 	int ret;
 
 #ifndef ENABLE_SKIP_FIB
-	ret = fib_lookup(ctx, &fib_params->l, sizeof(fib_params->l),
-			 BPF_FIB_LOOKUP_DIRECT);
+	ret = fib_lookup(ctx, &fib_params->l, sizeof(fib_params->l), 0);
 	if (ret != BPF_FIB_LKUP_RET_SUCCESS) {
 		*fib_err = (__s8)ret;
 		if (likely(ret == BPF_FIB_LKUP_RET_NO_NEIGH)) {
@@ -84,7 +83,6 @@ fib_redirect(struct __ctx_buff *ctx, const bool needs_l2_check,
 skip_oif:
 #else
 	*oif = DIRECT_ROUTING_DEV_IFINDEX;
-	nh_params.nh_family = fib_params->l.family;
 #endif /* ENABLE_SKIP_FIB */
 	if (needs_l2_check) {
 		bool l2_hdr_required = true;
@@ -113,7 +111,7 @@ skip_oif:
 			 * inbound client traffic on the load-balancer where we
 			 * know that replies need to go back to them.
 			 */
-			dmac = nh_params.nh_family == AF_INET ?
+			dmac = fib_params->l.family == AF_INET ?
 			       neigh_lookup_ip4(&fib_params->l.ipv4_dst) :
 			       neigh_lookup_ip6((void *)&fib_params->l.ipv6_dst);
 			if (!dmac) {

@@ -15,8 +15,8 @@ import (
 	"github.com/cilium/cilium/pkg/byteorder"
 	"github.com/cilium/cilium/pkg/cidr"
 	"github.com/cilium/cilium/pkg/common"
-	"github.com/cilium/cilium/pkg/datapath"
 	"github.com/cilium/cilium/pkg/datapath/loader"
+	datapath "github.com/cilium/cilium/pkg/datapath/types"
 	"github.com/cilium/cilium/pkg/lock"
 	"github.com/cilium/cilium/pkg/logging"
 	"github.com/cilium/cilium/pkg/logging/logfields"
@@ -107,7 +107,7 @@ func NewRecorder(ctx context.Context, owner datapath.BaseProgramOwner) (*Recorde
 			maps = append(maps, t.Map())
 		}
 		for _, m := range maps {
-			if _, err := m.OpenOrCreate(); err != nil {
+			if err := m.OpenOrCreate(); err != nil {
 				return nil, err
 			}
 			if err := m.DeleteAll(); err != nil {

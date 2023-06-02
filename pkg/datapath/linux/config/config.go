@@ -13,6 +13,8 @@ import (
 	"io"
 	"net"
 	"sort"
+	"strconv"
+	"strings"
 	"text/template"
 
 	"github.com/sirupsen/logrus"
@@ -20,8 +22,8 @@ import (
 
 	"github.com/cilium/cilium/pkg/bpf"
 	"github.com/cilium/cilium/pkg/byteorder"
-	"github.com/cilium/cilium/pkg/datapath"
 	"github.com/cilium/cilium/pkg/datapath/link"
+	datapath "github.com/cilium/cilium/pkg/datapath/types"
 	"github.com/cilium/cilium/pkg/defaults"
 	"github.com/cilium/cilium/pkg/identity"
 	"github.com/cilium/cilium/pkg/labels"
@@ -29,12 +31,13 @@ import (
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/mac"
 	"github.com/cilium/cilium/pkg/maglev"
+	"github.com/cilium/cilium/pkg/maps/authmap"
 	"github.com/cilium/cilium/pkg/maps/bwmap"
 	"github.com/cilium/cilium/pkg/maps/callsmap"
+	"github.com/cilium/cilium/pkg/maps/configmap"
 	"github.com/cilium/cilium/pkg/maps/ctmap"
 	"github.com/cilium/cilium/pkg/maps/egressmap"
 	"github.com/cilium/cilium/pkg/maps/encrypt"
-	"github.com/cilium/cilium/pkg/maps/eppolicymap"
 	"github.com/cilium/cilium/pkg/maps/eventsmap"
 	"github.com/cilium/cilium/pkg/maps/fragmap"
 	ipcachemap "github.com/cilium/cilium/pkg/maps/ipcache"
@@ -48,17 +51,25 @@ import (
 	"github.com/cilium/cilium/pkg/maps/policymap"
 	"github.com/cilium/cilium/pkg/maps/recorder"
 	"github.com/cilium/cilium/pkg/maps/signalmap"
-	"github.com/cilium/cilium/pkg/maps/sockmap"
 	"github.com/cilium/cilium/pkg/maps/srv6map"
 	"github.com/cilium/cilium/pkg/maps/tunnel"
 	"github.com/cilium/cilium/pkg/maps/vtep"
+	"github.com/cilium/cilium/pkg/maps/worldcidrsmap"
 	"github.com/cilium/cilium/pkg/netns"
 	"github.com/cilium/cilium/pkg/node"
 	"github.com/cilium/cilium/pkg/option"
+	"github.com/cilium/cilium/pkg/sysctl"
 	wgtypes "github.com/cilium/cilium/pkg/wireguard/types"
 )
 
-var log = logging.DefaultLogger.WithField(logfields.LogSubsys, "datapath-linux-config")
+var (
+	log = logging.DefaultLogger.WithField(logfields.LogSubsys, "datapath-linux-config")
+
+	tunnelProtocols = map[string]int{
+		option.TunnelVXLAN:  1,
+		option.TunnelGeneve: 2,
+	}
+)
 
 // HeaderfileWriter is a wrapper type which implements datapath.ConfigWriter.
 // It manages writing of configuration of datapath program headerfiles.
@@ -124,6 +135,20 @@ func (h *HeaderfileWriter) WriteNodeConfig(w io.Writer, cfg *datapath.LocalNodeC
 		fw.WriteString(defineIPv6("HOST_IP", hostIP))
 	}
 
+	for t, id := range tunnelProtocols {
+		macroName := fmt.Sprintf("TUNNEL_PROTOCOL_%s", strings.ToUpper(t))
+		cDefinesMap[macroName] = fmt.Sprintf("%d", id)
+	}
+
+	encapProto := option.Config.TunnelProtocol
+	if !option.Config.TunnelingEnabled() &&
+		option.Config.EnableNodePort &&
+		option.Config.NodePortMode == option.NodePortModeDSR &&
+		option.Config.LoadBalancerDSRDispatch == option.DSRDispatchGeneve {
+		encapProto = option.TunnelGeneve
+	}
+
+	cDefinesMap["TUNNEL_PROTOCOL"] = fmt.Sprintf("%d", tunnelProtocols[encapProto])
 	cDefinesMap["TUNNEL_PORT"] = fmt.Sprintf("%d", option.Config.TunnelPort)
 
 	cDefinesMap["HOST_ID"] = fmt.Sprintf("%d", identity.GetReservedID(labels.IDNameHost))
@@ -148,12 +173,15 @@ func (h *HeaderfileWriter) WriteNodeConfig(w io.Writer, cfg *datapath.LocalNodeC
 	cDefinesMap["METRICS_MAP"] = metricsmap.MapName
 	cDefinesMap["METRICS_MAP_SIZE"] = fmt.Sprintf("%d", metricsmap.MaxEntries)
 	cDefinesMap["POLICY_MAP_SIZE"] = fmt.Sprintf("%d", policymap.MaxEntries)
+	cDefinesMap["AUTH_MAP"] = authmap.MapName
+	cDefinesMap["AUTH_MAP_SIZE"] = fmt.Sprintf("%d", option.Config.AuthMapEntries)
+	cDefinesMap["CONFIG_MAP"] = configmap.MapName
+	cDefinesMap["CONFIG_MAP_SIZE"] = fmt.Sprintf("%d", configmap.MaxEntries)
 	cDefinesMap["IPCACHE_MAP"] = ipcachemap.Name
 	cDefinesMap["IPCACHE_MAP_SIZE"] = fmt.Sprintf("%d", ipcachemap.MaxEntries)
 	cDefinesMap["NODE_MAP"] = nodemap.MapName
 	cDefinesMap["NODE_MAP_SIZE"] = fmt.Sprintf("%d", nodemap.MaxEntries)
 	cDefinesMap["EGRESS_POLICY_MAP"] = egressmap.PolicyMapName
-	cDefinesMap["EGRESS_POLICY_MAP_SIZE"] = fmt.Sprintf("%d", option.Config.EgressGatewayPolicyMapEntries)
 	cDefinesMap["SRV6_VRF_MAP4"] = srv6map.VRFMapName4
 	cDefinesMap["SRV6_VRF_MAP6"] = srv6map.VRFMapName6
 	cDefinesMap["SRV6_POLICY_MAP4"] = srv6map.PolicyMapName4
@@ -165,8 +193,9 @@ func (h *HeaderfileWriter) WriteNodeConfig(w io.Writer, cfg *datapath.LocalNodeC
 	cDefinesMap["SRV6_POLICY_MAP_SIZE"] = fmt.Sprintf("%d", srv6map.MaxPolicyEntries)
 	cDefinesMap["SRV6_SID_MAP_SIZE"] = fmt.Sprintf("%d", srv6map.MaxSIDEntries)
 	cDefinesMap["SRV6_STATE_MAP_SIZE"] = fmt.Sprintf("%d", srv6map.MaxStateEntries)
+	cDefinesMap["WORLD_CIDRS4_MAP"] = worldcidrsmap.MapName4
+	cDefinesMap["WORLD_CIDRS4_MAP_SIZE"] = fmt.Sprintf("%d", worldcidrsmap.MapMaxEntries)
 	cDefinesMap["POLICY_PROG_MAP_SIZE"] = fmt.Sprintf("%d", policymap.PolicyCallMaxEntries)
-	cDefinesMap["SOCKOPS_MAP_SIZE"] = fmt.Sprintf("%d", sockmap.MaxEntries)
 	cDefinesMap["ENCRYPT_MAP"] = encrypt.MapName
 	cDefinesMap["CT_CONNECTION_LIFETIME_TCP"] = fmt.Sprintf("%d", int64(option.Config.CTMapEntriesTimeoutTCP.Seconds()))
 	cDefinesMap["CT_CONNECTION_LIFETIME_NONTCP"] = fmt.Sprintf("%d", int64(option.Config.CTMapEntriesTimeoutAny.Seconds()))
@@ -183,6 +212,8 @@ func (h *HeaderfileWriter) WriteNodeConfig(w io.Writer, cfg *datapath.LocalNodeC
 	cDefinesMap["PER_CLUSTER_CT_TCP6"] = "cilium_per_cluster_ct_tcp6"
 	cDefinesMap["PER_CLUSTER_CT_ANY4"] = "cilium_per_cluster_ct_any4"
 	cDefinesMap["PER_CLUSTER_CT_ANY6"] = "cilium_per_cluster_ct_any6"
+	cDefinesMap["PER_CLUSTER_SNAT_MAPPING_IPV4"] = "cilium_per_cluster_snat_v4_external"
+	cDefinesMap["PER_CLUSTER_SNAT_MAPPING_IPV6"] = "cilium_per_cluster_snat_v6_external"
 
 	if option.Config.PreAllocateMaps {
 		cDefinesMap["PREALLOCATE_MAPS"] = "1"
@@ -194,7 +225,6 @@ func (h *HeaderfileWriter) WriteNodeConfig(w io.Writer, cfg *datapath.LocalNodeC
 	if option.Config.EnableEnvoyConfig {
 		cDefinesMap["POLICY_EGRESSCALL_MAP"] = policymap.PolicyEgressCallMapName
 	}
-	cDefinesMap["EP_POLICY_MAP"] = eppolicymap.MapName
 	cDefinesMap["LB6_REVERSE_NAT_MAP"] = "cilium_lb6_reverse_nat"
 	cDefinesMap["LB6_SERVICES_MAP_V2"] = "cilium_lb6_services_v2"
 	cDefinesMap["LB6_BACKEND_MAP"] = "cilium_lb6_backends_v3"
@@ -357,6 +387,7 @@ func (h *HeaderfileWriter) WriteNodeConfig(w io.Writer, cfg *datapath.LocalNodeC
 			dsrEncapInv = iota
 			dsrEncapNone
 			dsrEncapIPIP
+			dsrEncapGeneve
 		)
 		const (
 			dsrL4XlateInv = iota
@@ -364,6 +395,7 @@ func (h *HeaderfileWriter) WriteNodeConfig(w io.Writer, cfg *datapath.LocalNodeC
 			dsrL4XlateBackend
 		)
 		cDefinesMap["DSR_ENCAP_IPIP"] = fmt.Sprintf("%d", dsrEncapIPIP)
+		cDefinesMap["DSR_ENCAP_GENEVE"] = fmt.Sprintf("%d", dsrEncapGeneve)
 		cDefinesMap["DSR_ENCAP_NONE"] = fmt.Sprintf("%d", dsrEncapNone)
 		cDefinesMap["DSR_XLATE_FRONTEND"] = fmt.Sprintf("%d", dsrL4XlateFrontend)
 		cDefinesMap["DSR_XLATE_BACKEND"] = fmt.Sprintf("%d", dsrL4XlateBackend)
@@ -380,6 +412,8 @@ func (h *HeaderfileWriter) WriteNodeConfig(w io.Writer, cfg *datapath.LocalNodeC
 				cDefinesMap["DSR_ENCAP_MODE"] = fmt.Sprintf("%d", dsrEncapNone)
 			} else if option.Config.LoadBalancerDSRDispatch == option.DSRDispatchIPIP {
 				cDefinesMap["DSR_ENCAP_MODE"] = fmt.Sprintf("%d", dsrEncapIPIP)
+			} else if option.Config.LoadBalancerDSRDispatch == option.DSRDispatchGeneve {
+				cDefinesMap["DSR_ENCAP_MODE"] = fmt.Sprintf("%d", dsrEncapGeneve)
 			}
 			if option.Config.LoadBalancerDSRDispatch == option.DSRDispatchIPIP {
 				if option.Config.LoadBalancerDSRL4Xlate == option.DSRL4XlateFrontend {
@@ -584,6 +618,10 @@ func (h *HeaderfileWriter) WriteNodeConfig(w io.Writer, cfg *datapath.LocalNodeC
 		cDefinesMap["ENABLE_IDENTITY_MARK"] = "1"
 	}
 
+	if option.Config.EnableHighScaleIPcache {
+		cDefinesMap["ENABLE_HIGH_SCALE_IPCACHE"] = "1"
+	}
+
 	if option.Config.EnableCustomCalls {
 		cDefinesMap["ENABLE_CUSTOM_CALLS"] = "1"
 	}
@@ -608,6 +646,30 @@ func (h *HeaderfileWriter) WriteNodeConfig(w io.Writer, cfg *datapath.LocalNodeC
 
 	cDefinesMap["CIDR_IDENTITY_RANGE_START"] = fmt.Sprintf("%d", identity.MinLocalIdentity)
 	cDefinesMap["CIDR_IDENTITY_RANGE_END"] = fmt.Sprintf("%d", identity.MaxLocalIdentity)
+
+	if option.Config.TunnelingEnabled() {
+		cDefinesMap["TUNNEL_MODE"] = "1"
+	}
+
+	ciliumNetLink, err := netlink.LinkByName(defaults.SecondHostDevice)
+	if err != nil {
+		return err
+	}
+	cDefinesMap["CILIUM_NET_MAC"] = fmt.Sprintf("{.addr=%s}", mac.CArrayString(ciliumNetLink.Attrs().HardwareAddr))
+	cDefinesMap["HOST_IFINDEX"] = fmt.Sprintf("%d", ciliumNetLink.Attrs().Index)
+
+	ciliumHostLink, err := netlink.LinkByName(defaults.HostDevice)
+	if err != nil {
+		return err
+	}
+	cDefinesMap["HOST_IFINDEX_MAC"] = fmt.Sprintf("{.addr=%s}", mac.CArrayString(ciliumHostLink.Attrs().HardwareAddr))
+	cDefinesMap["CILIUM_IFINDEX"] = fmt.Sprintf("%d", ciliumHostLink.Attrs().Index)
+
+	ephemeralMin, err := getEphemeralPortRangeMin()
+	if err != nil {
+		return err
+	}
+	cDefinesMap["EPHEMERAL_MIN"] = fmt.Sprintf("%d", ephemeralMin)
 
 	// Since golang maps are unordered, we sort the keys in the map
 	// to get a consistent written format to the writer. This maintains
@@ -641,6 +703,24 @@ func (h *HeaderfileWriter) WriteNodeConfig(w io.Writer, cfg *datapath.LocalNodeC
 	}
 
 	return fw.Flush()
+}
+
+func getEphemeralPortRangeMin() (int, error) {
+	ephemeralPortRangeStr, err := sysctl.Read("net.ipv4.ip_local_port_range")
+	if err != nil {
+		return 0, fmt.Errorf("unable to read net.ipv4.ip_local_port_range: %w", err)
+	}
+	ephemeralPortRange := strings.Split(ephemeralPortRangeStr, "\t")
+	if len(ephemeralPortRange) != 2 {
+		return 0, fmt.Errorf("invalid ephemeral port range: %s", ephemeralPortRangeStr)
+	}
+	ephemeralPortMin, err := strconv.Atoi(ephemeralPortRange[0])
+	if err != nil {
+		return 0, fmt.Errorf("unable to parse min port value %s for ephemeral range: %w",
+			ephemeralPortRange[0], err)
+	}
+
+	return ephemeralPortMin, nil
 }
 
 // vlanFilterMacros generates VLAN_FILTER macros which
@@ -769,23 +849,6 @@ is_l3; })`))
 func (h *HeaderfileWriter) writeNetdevConfig(w io.Writer, cfg datapath.DeviceConfiguration) {
 	fmt.Fprint(w, cfg.GetOptions().GetFmtList())
 
-	// In case the Linux kernel doesn't support LPM map type, pass the set
-	// of prefix length for the datapath to lookup the map.
-	if !ipcachemap.BackedByLPM() {
-		ipcachePrefixes6, ipcachePrefixes4 := cfg.GetCIDRPrefixLengths()
-
-		fmt.Fprint(w, "#define IPCACHE6_PREFIXES ")
-		for _, prefix := range ipcachePrefixes6 {
-			fmt.Fprintf(w, "%d,", prefix)
-		}
-		fmt.Fprint(w, "\n")
-		fmt.Fprint(w, "#define IPCACHE4_PREFIXES ")
-		for _, prefix := range ipcachePrefixes4 {
-			fmt.Fprintf(w, "%d,", prefix)
-		}
-		fmt.Fprint(w, "\n")
-	}
-
 	if option.Config.EnableEndpointRoutes {
 		fmt.Fprint(w, "#define USE_BPF_PROG_FOR_INGRESS_POLICY 1\n")
 	}
@@ -826,7 +889,7 @@ func (h *HeaderfileWriter) writeStaticData(fw io.Writer, e datapath.EndpointConf
 		// Use templating for ETH_HLEN only if there is any L2-less device
 		if !mac.HaveMACAddrs(option.Config.GetDevices()) {
 			// L2 hdr len (for L2-less devices it will be replaced with "0")
-			fmt.Fprint(fw, defineUint32("ETH_HLEN", mac.EthHdrLen))
+			fmt.Fprint(fw, defineUint16("ETH_HLEN", mac.EthHdrLen))
 		}
 	} else {
 		// We want to ensure that the template BPF program always has "LXC_IP"
@@ -884,10 +947,6 @@ func (h *HeaderfileWriter) WriteEndpointConfig(w io.Writer, e datapath.EndpointC
 func (h *HeaderfileWriter) writeTemplateConfig(fw *bufio.Writer, e datapath.EndpointConfiguration) error {
 	if e.RequireEgressProg() {
 		fmt.Fprintf(fw, "#define USE_BPF_PROG_FOR_INGRESS_POLICY 1\n")
-	}
-
-	if option.Config.ForceLocalPolicyEvalAtSource {
-		fmt.Fprintf(fw, "#define FORCE_LOCAL_POLICY_EVAL_AT_SOURCE 1\n")
 	}
 
 	if e.RequireRouting() {

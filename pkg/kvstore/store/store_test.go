@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright Authors of Cilium
 
-//go:build integration_tests
-
 package store
 
 import (
@@ -12,13 +10,14 @@ import (
 	"testing"
 	"time"
 
-	. "gopkg.in/check.v1"
+	. "github.com/cilium/checkmate"
 
 	"github.com/cilium/cilium/pkg/defaults"
 	"github.com/cilium/cilium/pkg/kvstore"
 	"github.com/cilium/cilium/pkg/lock"
 	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/rand"
+	"github.com/cilium/cilium/pkg/testutils"
 )
 
 const (
@@ -32,11 +31,19 @@ func Test(t *testing.T) {
 
 type StoreSuite struct{}
 
+func (s *StoreSuite) SetUpSuite(c *C) {
+	testutils.IntegrationCheck(c)
+}
+
 type StoreEtcdSuite struct {
 	StoreSuite
 }
 
 var _ = Suite(&StoreEtcdSuite{})
+
+func (e *StoreEtcdSuite) SetUpSuite(c *C) {
+	testutils.IntegrationCheck(c)
+}
 
 func (e *StoreEtcdSuite) SetUpTest(c *C) {
 	kvstore.SetupDummy("etcd")
@@ -52,6 +59,10 @@ type StoreConsulSuite struct {
 }
 
 var _ = Suite(&StoreConsulSuite{})
+
+func (e *StoreConsulSuite) SetUpSuite(c *C) {
+	testutils.IntegrationCheck(c)
+}
 
 func (e *StoreConsulSuite) SetUpTest(c *C) {
 	kvstore.SetupDummy("consul")
@@ -69,10 +80,10 @@ type TestType struct {
 
 var _ = TestType{}
 
-func (t *TestType) GetKeyName() string          { return t.Name }
-func (t *TestType) DeepKeyCopy() LocalKey       { return &TestType{Name: t.Name} }
-func (t *TestType) Marshal() ([]byte, error)    { return json.Marshal(t) }
-func (t *TestType) Unmarshal(data []byte) error { return json.Unmarshal(data, t) }
+func (t *TestType) GetKeyName() string                    { return t.Name }
+func (t *TestType) DeepKeyCopy() LocalKey                 { return &TestType{Name: t.Name} }
+func (t *TestType) Marshal() ([]byte, error)              { return json.Marshal(t) }
+func (t *TestType) Unmarshal(_ string, data []byte) error { return json.Unmarshal(data, t) }
 
 type opCounter struct {
 	deleted int

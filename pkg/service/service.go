@@ -527,7 +527,7 @@ func (s *Service) InitMaps(ipv6, ipv4, sockMaps, restore bool) error {
 	}
 
 	for _, m := range toOpen {
-		if _, err := m.OpenOrCreate(); err != nil {
+		if err := m.OpenOrCreate(); err != nil {
 			return err
 		}
 	}
@@ -696,10 +696,17 @@ func (s *Service) upsertService(params *lb.SVC) (bool, lb.ID, error) {
 	// only contain local backends (i.e. it has externalTrafficPolicy=Local)
 	if option.Config.EnableHealthCheckNodePort {
 		if svc.isExtLocal() && filterBackends {
-			_, activeBackends, _ := segregateBackends(backendsCopy)
-
+			// HealthCheckNodePort is used by external systems to poll the state of the Service,
+			// it should never take into consideration Terminating backends, even when there are only
+			// Terminating backends.
+			activeBackends := 0
+			for _, b := range backendsCopy {
+				if b.State == lb.BackendStateActive {
+					activeBackends++
+				}
+			}
 			s.healthServer.UpsertService(lb.ID(svc.frontend.ID), svc.svcName.Namespace, svc.svcName.Name,
-				len(activeBackends), svc.svcHealthCheckNodePort)
+				activeBackends, svc.svcHealthCheckNodePort)
 		} else if svc.svcHealthCheckNodePort == 0 {
 			// Remove the health check server in case this service used to have
 			// externalTrafficPolicy=Local with HealthCheckNodePort in the previous
@@ -946,20 +953,28 @@ func (s *Service) GetDeepCopyServicesByName(name, namespace string) (svcs []*lb.
 
 // RestoreServices restores services from BPF maps.
 //
+// It first restores all the service entries, followed by backend entries.
+// In the process, it deletes any duplicate backend entries that were leaked, and
+// are not referenced by any service entries.
+//
 // The method should be called once before establishing a connectivity
 // to kube-apiserver.
 func (s *Service) RestoreServices() error {
 	s.Lock()
 	defer s.Unlock()
-
-	// Restore backend IDs
-	if err := s.restoreBackendsLocked(); err != nil {
-		return err
-	}
+	var errs error
+	backendsById := make(map[lb.BackendID]struct{})
 
 	// Restore service cache from BPF maps
-	if err := s.restoreServicesLocked(); err != nil {
-		return err
+	if err := s.restoreServicesLocked(backendsById); err != nil {
+		errs = multierr.Append(errs,
+			fmt.Errorf("error while restoring services: %w", err))
+	}
+
+	// Restore backend IDs
+	if err := s.restoreBackendsLocked(backendsById); err != nil {
+		errs = multierr.Append(errs,
+			fmt.Errorf("error while restoring backends: %w", err))
 	}
 
 	// Remove LB source ranges for no longer existing services
@@ -969,7 +984,7 @@ func (s *Service) RestoreServices() error {
 		}
 	}
 
-	return nil
+	return errs
 }
 
 // deleteOrphanAffinityMatchesLocked removes affinity matches which point to
@@ -1148,7 +1163,7 @@ func (s *Service) createSVCInfoIfNotExist(p *lb.SVC) (*svcInfo, bool, bool,
 		svc.sessionAffinity = p.SessionAffinity
 		svc.sessionAffinityTimeoutSec = p.SessionAffinityTimeoutSec
 		svc.loadBalancerSourceRanges = p.LoadBalancerSourceRanges
-		// Name and namespace are both optional and intended for exposure via
+		// Name, namespace and cluster are optional and intended for exposure via
 		// API. They they are not part of any BPF maps and cannot be restored
 		// from datapath.
 		if p.Name.Name != "" {
@@ -1156,6 +1171,9 @@ func (s *Service) createSVCInfoIfNotExist(p *lb.SVC) (*svcInfo, bool, bool,
 		}
 		if p.Name.Namespace != "" {
 			svc.svcName.Namespace = p.Name.Namespace
+		}
+		if p.Name.Cluster != "" {
+			svc.svcName.Cluster = p.Name.Cluster
 		}
 		// We have heard about the service from k8s, so unset the flag so that
 		// SyncWithK8sFinished() won't consider the service obsolete, and thus
@@ -1342,13 +1360,14 @@ func (s *Service) upsertServiceIntoLBMaps(svc *svcInfo, isExtLocal, isIntLocal b
 	return nil
 }
 
-func (s *Service) restoreBackendsLocked() error {
-	failed, restored := 0, 0
+func (s *Service) restoreBackendsLocked(svcBackendsById map[lb.BackendID]struct{}) error {
+	failed, restored, skipped := 0, 0, 0
 	backends, err := s.lbmap.DumpBackendMaps()
 	if err != nil {
 		return fmt.Errorf("Unable to dump backend maps: %s", err)
 	}
 
+	svcBackendsCount := len(svcBackendsById)
 	for _, b := range backends {
 		log.WithFields(logrus.Fields{
 			logfields.BackendID:        b.ID,
@@ -1356,6 +1375,57 @@ func (s *Service) restoreBackendsLocked() error {
 			logfields.BackendState:     b.State,
 			logfields.BackendPreferred: b.Preferred,
 		}).Debug("Restoring backend")
+		if _, ok := svcBackendsById[b.ID]; !ok && (svcBackendsCount != 0) {
+			// If a backend by ID isn't referenced by any of the services, it's
+			// likely a leaked backend. In case of duplicate leaked backends,
+			// there would be multiple IDs allocated for the same backend resource
+			// identified by its L3nL4Addr hash. The second check for service
+			// backends count is added for unusual cases where there might've been
+			// a problem with reading entries from the services map. In such cases,
+			// the agent should not wipe out the backends map, as this can disrupt
+			// existing connections. SyncWithK8sFinished will later sync the backends
+			// map with the latest state.
+			// Leaked backend scenarios:
+			// 1) Backend entries leaked, no duplicates
+			// 2) Backend entries leaked with duplicates:
+			// 	a) backend with overlapping L3nL4Addr hash is associated with service(s)
+			//     Sequence of events:
+			//     Backends were leaked prior to agent restart, but there was at least
+			//     one service that the backend by hash is associated with.
+			//     s.backendByHash will have a non-zero reference count for the
+			//     overlapping L3nL4Addr hash.
+			// 	b) none of the backends are associated with services
+			//     Sequence of events:
+			// 	   All the services these backends were associated with were deleted
+			//     prior to agent restart.
+			//     s.backendByHash will not have an entry for the backends hash.
+			// As none of the service entries have a reference to these backends
+			// in the services map, the backends were likely not available for
+			// load-balancing new traffic. While there is a slim chance that the
+			// backends could have previously established active connections,
+			// and these connections can get disrupted. However, the leaks likely
+			// happened when service entries were deleted, so those connections
+			// were also expected to be terminated.
+			// Regardless, delete the duplicates as this can affect restoration of current
+			// active backends, and may prevent new backends getting added as map
+			// size is limited, which can lead to connectivity disruptions.
+			id := b.ID
+			DeleteBackendID(id)
+			if err := s.lbmap.DeleteBackendByID(id); err != nil {
+				// As the backends map is not expected to be updated during restore,
+				// the deletion call shouldn't fail. But log the error, just
+				// in case...
+				log.Errorf("unable to delete leaked backend: %v", id)
+			}
+			log.WithFields(logrus.Fields{
+				logfields.BackendID:        b.ID,
+				logfields.L3n4Addr:         b.L3n4Addr,
+				logfields.BackendState:     b.State,
+				logfields.BackendPreferred: b.Preferred,
+			}).Debug("Leaked backend entry not restored")
+			skipped++
+			continue
+		}
 		if err := RestoreBackendID(b.L3n4Addr, b.ID); err != nil {
 			log.WithError(err).WithFields(logrus.Fields{
 				logfields.BackendID:        b.ID,
@@ -1374,12 +1444,15 @@ func (s *Service) restoreBackendsLocked() error {
 	log.WithFields(logrus.Fields{
 		logfields.RestoredBackends: restored,
 		logfields.FailedBackends:   failed,
+		logfields.SkippedBackends:  skipped,
 	}).Info("Restored backends from maps")
 
 	return nil
 }
 
 func (s *Service) deleteOrphanBackends() error {
+	orphanBackends := 0
+
 	for hash, b := range s.backendByHash {
 		if s.backendRefCount[hash] == 0 {
 			log.WithField(logfields.BackendID, b.ID).
@@ -1389,13 +1462,17 @@ func (s *Service) deleteOrphanBackends() error {
 			DeleteBackendID(b.ID)
 			s.lbmap.DeleteBackendByID(b.ID)
 			delete(s.backendByHash, hash)
+			orphanBackends++
 		}
 	}
+	log.WithFields(logrus.Fields{
+		logfields.OrphanBackends: orphanBackends,
+	}).Info("Deleted orphan backends")
 
 	return nil
 }
 
-func (s *Service) restoreServicesLocked() error {
+func (s *Service) restoreServicesLocked(svcBackendsById map[lb.BackendID]struct{}) error {
 	failed, restored := 0, 0
 
 	svcs, errors := s.lbmap.DumpServiceMaps()
@@ -1445,6 +1522,7 @@ func (s *Service) restoreServicesLocked() error {
 			hash := backend.L3n4Addr.Hash()
 			s.backendRefCount.Add(hash)
 			newSVC.backendByHash[hash] = svc.Backends[j]
+			svcBackendsById[backend.ID] = struct{}{}
 		}
 
 		// Recalculate Maglev lookup tables if the maps were removed due to
@@ -1679,6 +1757,9 @@ func isWildcardAddr(frontend lb.L3n4AddrID) bool {
 	return cmtypes.MustParseAddrCluster("0.0.0.0").Equal(frontend.AddrCluster)
 }
 
+// segregateBackends returns the list of active, preferred and nonActive backends to be
+// added to the lbmaps. If EnableK8sTerminatingEndpoint and there are no active backends,
+// segregateBackends will return all terminating backends as active.
 func segregateBackends(backends []*lb.Backend) (preferredBackends map[string]*lb.Backend,
 	activeBackends map[string]*lb.Backend, nonActiveBackends []lb.BackendID) {
 	preferredBackends = make(map[string]*lb.Backend)
@@ -1698,6 +1779,21 @@ func segregateBackends(backends []*lb.Backend) (preferredBackends map[string]*lb
 			}
 		} else {
 			nonActiveBackends = append(nonActiveBackends, b.ID)
+		}
+	}
+	// To avoid connections drops during rolling updates, Kubernetes defines a Terminating state on the EndpointSlices
+	// that can be used to identify Pods that, despite being terminated, still can serve traffic.
+	// In case that there are no Active backends, use the Backends in TerminatingState to answer new requests
+	// and avoid traffic disruption until new active backends are created.
+	// https://github.com/kubernetes/enhancements/tree/master/keps/sig-network/1669-proxy-terminating-endpoints
+	if option.Config.EnableK8sTerminatingEndpoint && len(activeBackends) == 0 {
+		nonActiveBackends = []lb.BackendID{}
+		for _, b := range backends {
+			if b.State == lb.BackendStateTerminating {
+				activeBackends[b.String()] = b
+			} else {
+				nonActiveBackends = append(nonActiveBackends, b.ID)
+			}
 		}
 	}
 	return preferredBackends, activeBackends, nonActiveBackends

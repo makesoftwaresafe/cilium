@@ -1,30 +1,14 @@
 # Maintainers
 
 See [Governance](Documentation/community/governance/commit_access.rst) for
-governance, commit, and vote guidelines as well as maintainer responsibilities.
+governance, commit, and vote guidelines as well as committer responsibilities.
 Everybody listed is a committer as per governance definition.
 
-All committers and maintainers have identical voting rights. Maintainers have
-additional administrative and janitorial responsibilities.
-
-Regardless of maintainer or committer status, any code contribution is subject
-to code review requirements as per [CODEOWNERS](CODEOWNERS) and PRs get merged
-by the "janitor role" which is rotated between all committers.
-
-## Cilium Maintainers
-
- * [André Martins] (Isovalent)
- * [Joe Stringer] (Isovalent)
-
-## Hubble Maintainers
-
- * [Glib Smaga] (Isovalent)
- * [Sebastian Wicki] (Isovalent)
-
-## Cilium & Hubble Committers
+## Cilium Committers
 
  * [Aditi Ghag] (Isovalent)
  * [Alexandre Perrin] (Isovalent)
+ * [André Martins] (Isovalent)
  * [Beatriz Martínez] (Isovalent)
  * [Bill Mulligan] (Isovalent)
  * [Bruno M. Custódio] (Isovalent)
@@ -34,16 +18,20 @@ by the "janitor role" which is rotated between all committers.
  * [Daniel Borkmann] (Isovalent)
  * [Dan Wendlandt] (Isovalent)
  * [Deepesh Pathak]
+ * [Dylan Reimerink] (Isovalent)
  * [Eloy Coto] (Red Hat)
  * [Gilberto Bertin] (Isovalent)
+ * [Glib Smaga] (Isovalent)
  * [Hemanth Malla] (Datadog)
  * [Ian Vernon]
  * [Jarno Rajahalme] (Isovalent)
+ * [Joe Stringer] (Isovalent)
  * [John Fastabend] (Isovalent)
  * [Julian Wiedmann] (Isovalent)
  * [Kornilios Kourtis] (Isovalent)
  * [Laurent Bernaille] (Datadog)
  * [Liz Rice] (Isovalent)
+ * [Lorenz Bauer] (Isovalent)
  * [Louis DeLosSantos] (Isovalent)
  * [Maciej Kwiek] (Isovalent)
  * [Martynas Pumputis] (Isovalent)
@@ -56,6 +44,7 @@ by the "janitor role" which is rotated between all committers.
  * [Paul Chaignon] (Isovalent)
  * [Quentin Monnet] (Isovalent)
  * [Robin Hahling] (Isovalent)
+ * [Sebastian Wicki] (Isovalent)
  * [Tam Mach] (Isovalent)
  * [Thomas Graf] (Isovalent)
  * [Timo Beckers] (Isovalent)
@@ -90,6 +79,7 @@ project.
 [Daniel Borkmann]: https://github.com/borkmann
 [Dan Wendlandt]: https://github.com/danwent
 [Deepesh Pathak]: https://github.com/fristonio
+[Dylan Reimerink]: https://github.com/dylandreimerink
 [Eloy Coto]: https://github.com/eloycoto
 [Gilberto Bertin]: https://github.com/jibi
 [Glib Smaga]: https://github.com/glibsm
@@ -103,6 +93,7 @@ project.
 [Kornilios Kourtis]: https://github.com/kkourt
 [Laurent Bernaille]: https://github.com/lbernail
 [Liz Rice]: https://github.com/lizrice
+[Lorenz Bauer]: https://github.com/lmb
 [Louis DeLosSantos]: https://github.com/ldelossa
 [Maciej Kwiek]: https://github.com/nebril
 [Martynas Pumputis]: https://github.com/brb

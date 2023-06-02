@@ -1,6 +1,9 @@
 /* SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause) */
 /* Copyright Authors of Cilium */
 
+#ifndef __NODE_CONFIG__
+#define __NODE_CONFIG__
+
 /*
  *
  *
@@ -12,6 +15,8 @@
  *
  */
 #include "lib/utils.h"
+
+#define CLUSTER_ID 0
 
 #ifndef NODE_MAC
 DEFINE_MAC(NODE_MAC, 0xde, 0xad, 0xbe, 0xef, 0xc0, 0xde);
@@ -36,6 +41,11 @@ DEFINE_IPV6(HOST_IP, 0xbe, 0xef, 0x0, 0x0, 0x0, 0x0, 0x0, 0x1, 0x0, 0x0, 0xa, 0x
 #endif
 
 #define TUNNEL_PORT 8472
+#define TUNNEL_PROTOCOL_VXLAN 1
+#define TUNNEL_PROTOCOL_GENEVE 2
+#ifndef TUNNEL_PROTOCOL
+#define TUNNEL_PROTOCOL TUNNEL_PROTOCOL_VXLAN
+#endif
 
 #define HOST_ID 1
 #define WORLD_ID 2
@@ -82,11 +92,18 @@ DEFINE_IPV6(HOST_IP, 0xbe, 0xef, 0x0, 0x0, 0x0, 0x0, 0x0, 0x1, 0x0, 0x0, 0xa, 0x
 #ifdef ENABLE_NODEPORT
 #define SNAT_MAPPING_IPV4 test_cilium_snat_v4_external
 #define PER_CLUSTER_SNAT_MAPPING_IPV4 test_cilium_per_cluster_snat_v4_external
+#if defined(ENABLE_CLUSTER_AWARE_ADDRESSING) && defined(ENABLE_INTER_CLUSTER_SNAT)
+#define IPV4_INTER_CLUSTER_SNAT 0xfffff50a
+#endif
 #define SNAT_MAPPING_IPV4_SIZE 524288
 #define NODEPORT_NEIGH4_SIZE 524288
 #endif /* ENABLE_NODEPORT */
 #define CAPTURE4_RULES cilium_capture4_rules
 #define CAPTURE4_SIZE 16384
+# ifdef ENABLE_HIGH_SCALE_IPCACHE
+#  define IPV4_NATIVE_ROUTING_CIDR 0xffff0000
+#  define IPV4_NATIVE_ROUTING_CIDR_LEN 16
+# endif /* ENABLE_HIGH_SCALE_IPCACHE */
 #endif /* ENABLE_IPV4 */
 
 #ifdef ENABLE_IPV6
@@ -113,13 +130,13 @@ DEFINE_IPV6(HOST_IP, 0xbe, 0xef, 0x0, 0x0, 0x0, 0x0, 0x0, 0x1, 0x0, 0x0, 0xa, 0x
 #define SIGNAL_MAP test_cilium_signals
 #define METRICS_MAP test_cilium_metrics
 #define POLICY_CALL_MAP test_cilium_policy
-#define SOCK_OPS_MAP test_sock_ops_map
+#define AUTH_MAP test_cilium_auth
+#define CONFIG_MAP test_cilium_runtime_config
 #define IPCACHE_MAP test_cilium_ipcache
 #define NODE_MAP test_cilium_node_map
 #define ENCRYPT_MAP test_cilium_encrypt_state
 #define TUNNEL_MAP test_cilium_tunnel_map
 #define VTEP_MAP test_cilium_vtep_map
-#define EP_POLICY_MAP test_cilium_ep_to_policy
 #define LB6_REVERSE_NAT_MAP test_cilium_lb6_reverse_nat
 #define LB6_SERVICES_MAP_V2 test_cilium_lb6_services
 #define LB6_BACKEND_MAP test_cilium_lb6_backends
@@ -151,9 +168,10 @@ DEFINE_IPV6(HOST_IP, 0xbe, 0xef, 0x0, 0x0, 0x0, 0x0, 0x0, 0x1, 0x0, 0x0, 0xa, 0x
 #define CILIUM_LB_REV_NAT_MAP_MAX_ENTRIES	65536
 #define CILIUM_LB_MAGLEV_MAP_MAX_ENTRIES	65536
 #define POLICY_MAP_SIZE 16384
+#define AUTH_MAP_SIZE 512000
+#define CONFIG_MAP_SIZE 256
 #define IPCACHE_MAP_SIZE 512000
 #define NODE_MAP_SIZE 16384
-#define EGRESS_POLICY_MAP_SIZE 16384
 #define SRV6_VRF_MAP_SIZE 16384
 #define SRV6_POLICY_MAP_SIZE 16384
 #define SRV6_SID_MAP_SIZE 16384
@@ -184,6 +202,10 @@ DEFINE_IPV6(HOST_IP, 0xbe, 0xef, 0x0, 0x0, 0x0, 0x0, 0x0, 0x1, 0x0, 0x0, 0xa, 0x
 #define LB4_HEALTH_MAP test_cilium_lb4_health
 #define LB6_HEALTH_MAP test_cilium_lb6_health
 #endif /* ENABLE_NODEPORT || ENABLE_HOST_FIREWALL */
+#ifdef ENABLE_HIGH_SCALE_IPCACHE
+# define WORLD_CIDRS4_MAP test_cilium_world_cidrs4
+# define WORLD_CIDRS4_MAP_SIZE 16384
+#endif /* ENABLE_HIGH_SCALE_IPCACHE */
 
 #ifdef ENABLE_NODEPORT
 #ifdef ENABLE_IPV4
@@ -204,7 +226,9 @@ DEFINE_IPV6(HOST_IP, 0xbe, 0xef, 0x0, 0x0, 0x0, 0x0, 0x0, 0x1, 0x0, 0x0, 0xa, 0x
 #  define IPV4_RSS_PREFIX_BITS 32
 # endif
 # ifdef ENABLE_IPV6
-#  define IPV6_DIRECT_ROUTING { .addr = { 0x0, 0x0, 0x0, 0x0, 0x0, 0x0 } }
+#  ifndef IPV6_DIRECT_ROUTING
+#   define IPV6_DIRECT_ROUTING { .addr = { 0x0, 0x0, 0x0, 0x0, 0x0, 0x0 } }
+#  endif
 #  define IPV6_RSS_PREFIX IPV6_DIRECT_ROUTING
 #  define IPV6_RSS_PREFIX_BITS 128
 # endif
@@ -236,20 +260,6 @@ DEFINE_IPV6(HOST_IP, 0xbe, 0xef, 0x0, 0x0, 0x0, 0x0, 0x0, 0x1, 0x0, 0x0, 0xa, 0x
 # define VTEP_MASK 0xffffff
 #endif
 
-/* It appears that we can support around the below number of prefixes in an
- * unrolled loop for LPM CIDR handling in older kernels along with the rest of
- * the logic in the datapath, hence the defines below. This number was arrived
- * to by adjusting the number of prefixes and running:
- *
- *    $ make -C bpf && sudo test/bpf/verifier-test.sh
- *
- *  If you're from a future where all supported kernels include LPM map type,
- *  consider deprecating the hash-based CIDR lookup and removing the below.
- */
-#define IPCACHE4_PREFIXES 18, 17, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, \
-4, 3, 2, 1
-#define IPCACHE6_PREFIXES 4, 3, 2, 1
-
 #define VLAN_FILTER(ifindex, vlan_id) switch (ifindex) { \
 case 116: \
 switch (vlan_id) { \
@@ -278,3 +288,5 @@ return false;
 # define NAT_46X64_PREFIX_2 0
 # define NAT_46X64_PREFIX_3 0
 #endif
+
+#endif /* __NODE_CONFIG__ */

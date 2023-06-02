@@ -5,8 +5,10 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
+	"net/http"
 	"os"
 	"path"
 	"path/filepath"
@@ -18,32 +20,34 @@ import (
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/asm"
 	"github.com/cilium/ebpf/rlimit"
-	"github.com/go-openapi/loads"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/viper"
 	"google.golang.org/grpc"
 
+	healthApi "github.com/cilium/cilium/api/v1/health/server"
 	"github.com/cilium/cilium/api/v1/server"
 	"github.com/cilium/cilium/api/v1/server/restapi"
-	"github.com/cilium/cilium/pkg/auth"
+	"github.com/cilium/cilium/daemon/cmd/cni"
+	agentK8s "github.com/cilium/cilium/daemon/k8s"
+	"github.com/cilium/cilium/pkg/api"
 	"github.com/cilium/cilium/pkg/aws/eni"
 	bgpv1 "github.com/cilium/cilium/pkg/bgpv1/agent"
 	"github.com/cilium/cilium/pkg/bpf"
 	"github.com/cilium/cilium/pkg/cgroups"
+	"github.com/cilium/cilium/pkg/clustermesh"
 	"github.com/cilium/cilium/pkg/common"
 	"github.com/cilium/cilium/pkg/components"
 	"github.com/cilium/cilium/pkg/controller"
 	"github.com/cilium/cilium/pkg/crypto/certificatemanager"
-	"github.com/cilium/cilium/pkg/datapath"
-	"github.com/cilium/cilium/pkg/datapath/iptables"
-	"github.com/cilium/cilium/pkg/datapath/link"
 	linuxdatapath "github.com/cilium/cilium/pkg/datapath/linux"
 	"github.com/cilium/cilium/pkg/datapath/linux/ipsec"
 	"github.com/cilium/cilium/pkg/datapath/linux/probes"
 	linuxrouting "github.com/cilium/cilium/pkg/datapath/linux/routing"
 	"github.com/cilium/cilium/pkg/datapath/maps"
 	datapathOption "github.com/cilium/cilium/pkg/datapath/option"
+	datapath "github.com/cilium/cilium/pkg/datapath/types"
 	"github.com/cilium/cilium/pkg/defaults"
+	"github.com/cilium/cilium/pkg/egressgateway"
 	"github.com/cilium/cilium/pkg/endpointmanager"
 	"github.com/cilium/cilium/pkg/envoy"
 	"github.com/cilium/cilium/pkg/flowdebug"
@@ -52,7 +56,9 @@ import (
 	"github.com/cilium/cilium/pkg/hubble/exporter/exporteroption"
 	"github.com/cilium/cilium/pkg/hubble/observer/observeroption"
 	"github.com/cilium/cilium/pkg/identity"
+	ipamMetadata "github.com/cilium/cilium/pkg/ipam/metadata"
 	ipamOption "github.com/cilium/cilium/pkg/ipam/option"
+	"github.com/cilium/cilium/pkg/ipcache"
 	"github.com/cilium/cilium/pkg/ipmasq"
 	"github.com/cilium/cilium/pkg/k8s"
 	k8sClient "github.com/cilium/cilium/pkg/k8s/client"
@@ -66,12 +72,12 @@ import (
 	"github.com/cilium/cilium/pkg/maglev"
 	"github.com/cilium/cilium/pkg/maps/ctmap"
 	"github.com/cilium/cilium/pkg/maps/ctmap/gc"
-	"github.com/cilium/cilium/pkg/maps/egressmap"
 	"github.com/cilium/cilium/pkg/maps/lbmap"
 	"github.com/cilium/cilium/pkg/maps/nat"
 	"github.com/cilium/cilium/pkg/maps/neighborsmap"
 	"github.com/cilium/cilium/pkg/maps/policymap"
 	"github.com/cilium/cilium/pkg/metrics"
+	monitorAgent "github.com/cilium/cilium/pkg/monitor/agent"
 	monitorAPI "github.com/cilium/cilium/pkg/monitor/api"
 	"github.com/cilium/cilium/pkg/node"
 	nodeManager "github.com/cilium/cilium/pkg/node/manager"
@@ -79,13 +85,10 @@ import (
 	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/pidfile"
 	"github.com/cilium/cilium/pkg/policy"
-	"github.com/cilium/cilium/pkg/pprof"
 	"github.com/cilium/cilium/pkg/promise"
 	"github.com/cilium/cilium/pkg/sysctl"
 	"github.com/cilium/cilium/pkg/version"
-	wg "github.com/cilium/cilium/pkg/wireguard/agent"
 	wireguard "github.com/cilium/cilium/pkg/wireguard/agent"
-	wireguardTypes "github.com/cilium/cilium/pkg/wireguard/types"
 )
 
 const (
@@ -187,18 +190,11 @@ func initializeFlags() {
 	flags.String(option.CGroupRoot, "", "Path to Cgroup2 filesystem")
 	option.BindEnv(Vp, option.CGroupRoot)
 
-	flags.Bool(option.SockopsEnableName, defaults.SockopsEnable, "Enable sockops when kernel supported")
-	option.BindEnv(Vp, option.SockopsEnableName)
-	flags.MarkDeprecated(option.SockopsEnableName, "This option will be removed in v1.14")
-
 	flags.Int(option.ClusterIDName, 0, "Unique identifier of the cluster")
 	option.BindEnv(Vp, option.ClusterIDName)
 
 	flags.String(option.ClusterName, defaults.ClusterName, "Name of the cluster")
 	option.BindEnv(Vp, option.ClusterName)
-
-	flags.String(option.ClusterMeshConfigName, "", "Path to the ClusterMesh configuration directory")
-	option.BindEnv(Vp, option.ClusterMeshConfigName)
 
 	flags.StringSlice(option.CompilerFlags, []string{}, "Extra CFLAGS for BPF compilation")
 	flags.MarkHidden(option.CompilerFlags)
@@ -285,7 +281,7 @@ func initializeFlags() {
 	flags.String(option.EncryptInterface, "", "Transparent encryption interface")
 	option.BindEnv(Vp, option.EncryptInterface)
 
-	flags.Bool(option.EncryptNode, defaults.EncryptNode, "Enables encrypting traffic from non-Cilium pods and host networking (only supported with WireGuard)")
+	flags.Bool(option.EncryptNode, defaults.EncryptNode, "Enables encrypting traffic from non-Cilium pods and host networking (only supported with WireGuard, beta)")
 	option.BindEnv(Vp, option.EncryptNode)
 
 	flags.StringSlice(option.IPv4PodSubnets, []string{}, "List of IPv4 pod subnets to preconfigure for encryption")
@@ -293,6 +289,12 @@ func initializeFlags() {
 
 	flags.StringSlice(option.IPv6PodSubnets, []string{}, "List of IPv6 pod subnets to preconfigure for encryption")
 	option.BindEnv(Vp, option.IPv6PodSubnets)
+
+	flags.Var(option.NewNamedMapOptions(option.IPAMMultiPoolPreAllocation, &option.Config.IPAMMultiPoolPreAllocation, nil),
+		option.IPAMMultiPoolPreAllocation,
+		fmt.Sprintf("Defines how the minimum number of IPs a node should pre-allocate from each pool (default %s)", defaults.IPAMMultiPoolPreAllocation))
+	Vp.SetDefault(option.IPAMMultiPoolPreAllocation, defaults.IPAMMultiPoolPreAllocation)
+	option.BindEnv(Vp, option.IPAMMultiPoolPreAllocation)
 
 	flags.StringSlice(option.ExcludeLocalAddress, []string{}, "Exclude CIDR from being recognized as local address")
 	option.BindEnv(Vp, option.ExcludeLocalAddress)
@@ -354,6 +356,9 @@ func initializeFlags() {
 	flags.String(option.IPSecKeyFileName, "", "Path to IPSec key file")
 	option.BindEnv(Vp, option.IPSecKeyFileName)
 
+	flags.Duration(option.IPsecKeyRotationDuration, defaults.IPsecKeyRotationDuration, "Maximum duration of the IPsec key rotation. The previous key will be removed after that delay.")
+	option.BindEnv(Vp, option.IPsecKeyRotationDuration)
+
 	flags.Bool(option.EnableWireguard, false, "Enable wireguard")
 	option.BindEnv(Vp, option.EnableWireguard)
 
@@ -362,10 +367,6 @@ func initializeFlags() {
 
 	flags.String(option.NodeEncryptionOptOutLabels, defaults.NodeEncryptionOptOutLabels, "Label selector for nodes which will opt-out of node-to-node encryption")
 	option.BindEnv(Vp, option.NodeEncryptionOptOutLabels)
-
-	flags.Bool(option.ForceLocalPolicyEvalAtSource, defaults.ForceLocalPolicyEvalAtSource, "Force policy evaluation of all local communication at the source endpoint")
-	option.BindEnv(Vp, option.ForceLocalPolicyEvalAtSource)
-	flags.MarkDeprecated(option.ForceLocalPolicyEvalAtSource, "This option will be removed in v1.14")
 
 	flags.Bool(option.HTTPNormalizePath, true, "Use Envoy HTTP path normalization options, which currently includes RFC 3986 path normalization, Envoy merge slashes option, and unescaping and redirecting for paths that contain escaped slashes. These are necessary to keep path based access control functional, and should not interfere with normal operation. Set this to false only with caution.")
 	option.BindEnv(Vp, option.HTTPNormalizePath)
@@ -404,6 +405,9 @@ func initializeFlags() {
 	flags.Int64(option.ProxyMaxConnectionDuration, 0, "Set Envoy HTTP option max_connection_duration seconds. Default 0 (disable)")
 	option.BindEnv(Vp, option.ProxyMaxConnectionDuration)
 
+	flags.Int64(option.ProxyIdleTimeout, 60, "Set Envoy upstream HTTP idle connection timeout seconds. Does not apply to connections with pending requests. Default 60s")
+	option.BindEnv(Vp, option.ProxyIdleTimeout)
+
 	flags.Bool(option.DisableEnvoyVersionCheck, false, "Do not perform Envoy binary version check on startup")
 	flags.MarkHidden(option.DisableEnvoyVersionCheck)
 	// Disable version check if Envoy build is disabled
@@ -424,9 +428,6 @@ func initializeFlags() {
 
 	flags.String(option.IPAM, ipamOption.IPAMClusterPool, "Backend to use for IPAM")
 	option.BindEnv(Vp, option.IPAM)
-
-	flags.String(option.CNIChainingMode, "", "Enable CNI chaining with the specified plugin")
-	option.BindEnv(Vp, option.CNIChainingMode)
 
 	flags.String(option.IPv4Range, AutoCIDR, "Per-node IPv4 endpoint prefix, e.g. 10.16.0.0/16")
 	option.BindEnv(Vp, option.IPv4Range)
@@ -571,7 +572,7 @@ func initializeFlags() {
 	flags.String(option.LoadBalancerAlg, option.NodePortAlgRandom, "BPF load balancing algorithm (\"random\", \"maglev\")")
 	option.BindEnv(Vp, option.LoadBalancerAlg)
 
-	flags.String(option.LoadBalancerDSRDispatch, option.DSRDispatchOption, "BPF load balancing DSR dispatch method (\"opt\", \"ipip\")")
+	flags.String(option.LoadBalancerDSRDispatch, option.DSRDispatchOption, "BPF load balancing DSR dispatch method (\"opt\", \"ipip\", \"geneve\")")
 	option.BindEnv(Vp, option.LoadBalancerDSRDispatch)
 
 	flags.String(option.LoadBalancerDSRL4Xlate, option.DSRL4XlateFrontend, "BPF load balancing DSR L4 DNAT method for IPIP (\"frontend\", \"backend\")")
@@ -613,6 +614,9 @@ func initializeFlags() {
 
 	flags.Bool(option.EnableIdentityMark, true, "Enable setting identity mark for local traffic")
 	option.BindEnv(Vp, option.EnableIdentityMark)
+
+	flags.Bool(option.EnableHighScaleIPcache, defaults.EnableHighScaleIPcache, "Enable the high scale mode for ipcache")
+	option.BindEnv(Vp, option.EnableHighScaleIPcache)
 
 	flags.Bool(option.EnableHostFirewall, false, "Enable host network policies")
 	option.BindEnv(Vp, option.EnableHostFirewall)
@@ -668,12 +672,6 @@ func initializeFlags() {
 	flags.Bool(option.EnableIPv4EgressGateway, false, "Enable egress gateway for IPv4")
 	option.BindEnv(Vp, option.EnableIPv4EgressGateway)
 
-	flags.Bool(option.InstallEgressGatewayRoutes, false, "Install egress gateway IP rules and routes in order to properly steer egress gateway traffic to the correct ENI interface")
-	option.BindEnv(Vp, option.InstallEgressGatewayRoutes)
-
-	flags.Int(option.EgressGatewayPolicyMapEntriesName, egressmap.MaxPolicyEntries, "Maximum number of entries in egress gateway policy map")
-	option.BindEnv(Vp, option.EgressGatewayPolicyMapEntriesName)
-
 	flags.Bool(option.EnableEnvoyConfig, false, "Enable Envoy Config CRDs")
 	option.BindEnv(Vp, option.EnableEnvoyConfig)
 
@@ -700,15 +698,9 @@ func initializeFlags() {
 	flags.StringSlice(option.Metrics, []string{}, "Metrics that should be enabled or disabled from the default metric list. The list is expected to be separated by a space. (+metric_foo to enable metric_foo , -metric_bar to disable metric_bar)")
 	option.BindEnv(Vp, option.Metrics)
 
-	flags.Bool(option.EnableMonitorName, true, "Enable the monitor unix domain socket server")
-	option.BindEnv(Vp, option.EnableMonitorName)
-
 	flags.String(option.MonitorAggregationName, "None",
 		"Level of monitor aggregation for traces from the datapath")
 	option.BindEnvWithLegacyEnvFallback(Vp, option.MonitorAggregationName, "CILIUM_MONITOR_AGGREGATION_LEVEL")
-
-	flags.Int(option.MonitorQueueSizeName, 0, "Size of the event queue when reading monitor events")
-	option.BindEnv(Vp, option.MonitorQueueSizeName)
 
 	flags.Int(option.MTUName, 0, "Overwrite auto-detected MTU of underlying network")
 	option.BindEnv(Vp, option.MTUName)
@@ -728,9 +720,6 @@ func initializeFlags() {
 	flags.String(option.IPv4NodeAddr, "auto", "IPv4 address of node")
 	option.BindEnv(Vp, option.IPv4NodeAddr)
 
-	flags.String(option.ReadCNIConfiguration, "", fmt.Sprintf("CNI configuration file to use as a source for --%s. If not supplied, a suitable one will be generated.", option.WriteCNIConfigurationWhenReady))
-	option.BindEnv(Vp, option.ReadCNIConfiguration)
-
 	flags.Bool(option.Restore, true, "Restores state, if possible, from previous daemon")
 	option.BindEnv(Vp, option.Restore)
 
@@ -748,8 +737,19 @@ func initializeFlags() {
 	flags.String(option.StateDir, defaults.RuntimePath, "Directory path to store runtime state")
 	option.BindEnv(Vp, option.StateDir)
 
+	flags.Bool(option.ExternalEnvoyProxy, false, "whether the Envoy is deployed externally in form of a DaemonSet or not")
+	option.BindEnv(Vp, option.ExternalEnvoyProxy)
+
 	flags.StringP(option.TunnelName, "t", "", fmt.Sprintf("Tunnel mode {%s} (default \"vxlan\" for the \"veth\" datapath mode)", option.GetTunnelModes()))
 	option.BindEnv(Vp, option.TunnelName)
+	flags.MarkDeprecated(option.TunnelName,
+		fmt.Sprintf("This option will be removed in v1.15. Please use --%s and --%s instead.", option.RoutingMode, option.TunnelProtocol))
+
+	flags.String(option.RoutingMode, defaults.RoutingMode, fmt.Sprintf("Routing mode (%q or %q)", option.RoutingModeNative, option.RoutingModeTunnel))
+	option.BindEnv(Vp, option.RoutingMode)
+
+	flags.String(option.TunnelProtocol, defaults.TunnelProtocol, "Encapsulation protocol to use for the overlay (\"vxlan\" or \"geneve\")")
+	option.BindEnv(Vp, option.TunnelProtocol)
 
 	flags.Int(option.TunnelPortName, 0, fmt.Sprintf("Tunnel port (default %d for \"vxlan\" and %d for \"geneve\")", defaults.TunnelPortVXLAN, defaults.TunnelPortGeneve))
 	option.BindEnv(Vp, option.TunnelPortName)
@@ -759,15 +759,6 @@ func initializeFlags() {
 
 	flags.Bool(option.Version, false, "Print version information")
 	option.BindEnv(Vp, option.Version)
-
-	flags.Bool(option.PProf, false, "Enable serving pprof debugging API")
-	option.BindEnv(Vp, option.PProf)
-
-	flags.String(option.PProfAddress, defaults.PprofAddressAgent, "Address that pprof listens on")
-	option.BindEnv(Vp, option.PProfAddress)
-
-	flags.Int(option.PProfPort, defaults.PprofPortAgent, "Port that pprof listens on")
-	option.BindEnv(Vp, option.PProfPort)
 
 	flags.Bool(option.EnableXDPPrefilter, false, "Enable XDP prefiltering")
 	option.BindEnv(Vp, option.EnableXDPPrefilter)
@@ -782,6 +773,9 @@ func initializeFlags() {
 	// older spec used the older variable name.
 	flags.String(option.PrometheusServeAddr, ":9962", "IP:Port on which to serve prometheus metrics (pass \":Port\" to bind on all interfaces, \"\" is off)")
 	option.BindEnvWithLegacyEnvFallback(Vp, option.PrometheusServeAddr, "PROMETHEUS_SERVE_ADDR")
+
+	flags.Int(option.AuthMapEntriesName, option.AuthMapEntriesDefault, "Maximum number of entries in auth map")
+	option.BindEnv(Vp, option.AuthMapEntriesName)
 
 	flags.Int(option.CTMapEntriesGlobalTCPName, option.CTMapEntriesGlobalTCPDefault, "Maximum number of entries in TCP CT table")
 	option.BindEnvWithLegacyEnvFallback(Vp, option.CTMapEntriesGlobalTCPName, "CILIUM_GLOBAL_CT_MAX_TCP")
@@ -835,7 +829,7 @@ func initializeFlags() {
 	flags.MarkHidden(option.CMDRef)
 	option.BindEnv(Vp, option.CMDRef)
 
-	flags.Int(option.ToFQDNsMinTTL, 0, fmt.Sprintf("The minimum time, in seconds, to use DNS data for toFQDNs policies. (default %d )", defaults.ToFQDNsMinTTL))
+	flags.Int(option.ToFQDNsMinTTL, defaults.ToFQDNsMinTTL, "The minimum time, in seconds, to use DNS data for toFQDNs policies")
 	option.BindEnv(Vp, option.ToFQDNsMinTTL)
 
 	flags.Int(option.ToFQDNsProxyPort, 0, "Global port on which the in-agent DNS proxy should listen. Default 0 is a OS-assigned port.")
@@ -891,9 +885,6 @@ func initializeFlags() {
 
 	flags.Int(option.EndpointQueueSize, defaults.EndpointQueueSize, "Size of EventQueue per-endpoint")
 	option.BindEnv(Vp, option.EndpointQueueSize)
-
-	flags.String(option.WriteCNIConfigurationWhenReady, "", "Write the CNI configuration to the specified path when agent is ready")
-	option.BindEnv(Vp, option.WriteCNIConfigurationWhenReady)
 
 	flags.Duration(option.PolicyTriggerInterval, defaults.PolicyTriggerInterval, "Time between triggers of policy updates (regenerations for all endpoints)")
 	flags.MarkHidden(option.PolicyTriggerInterval)
@@ -964,6 +955,14 @@ func initializeFlags() {
 
 	flags.Bool(option.HubbleSkipUnknownCGroupIDs, true, "Skip Hubble events with unknown cgroup ids")
 	option.BindEnv(Vp, option.HubbleSkipUnknownCGroupIDs)
+
+	flags.StringSlice(option.HubbleMonitorEvents, []string{},
+		fmt.Sprintf(
+			"Cilium monitor events for Hubble to observe: [%s]. By default, Hubble observes all monitor events.",
+			strings.Join(monitorAPI.AllMessageTypeNames(), " "),
+		),
+	)
+	option.BindEnv(Vp, option.HubbleMonitorEvents)
 
 	flags.StringSlice(option.DisableIptablesFeederRules, []string{}, "Chains to ignore when installing feeder rules.")
 	option.BindEnv(Vp, option.DisableIptablesFeederRules)
@@ -1050,11 +1049,15 @@ func initializeFlags() {
 	flags.MarkHidden(option.EnableICMPRules)
 	option.BindEnv(Vp, option.EnableICMPRules)
 
+	flags.Bool(option.UseCiliumInternalIPForIPsec, defaults.UseCiliumInternalIPForIPsec, "Use the CiliumInternalIPs (vs. NodeInternalIPs) for IPsec encapsulation")
+	flags.MarkHidden(option.UseCiliumInternalIPForIPsec)
+	option.BindEnv(Vp, option.UseCiliumInternalIPForIPsec)
+
 	flags.Bool(option.BypassIPAvailabilityUponRestore, false, "Bypasses the IP availability error within IPAM upon endpoint restore")
 	flags.MarkHidden(option.BypassIPAvailabilityUponRestore)
 	option.BindEnv(Vp, option.BypassIPAvailabilityUponRestore)
 
-	flags.Bool(option.EnableCiliumEndpointSlice, false, "If set to true, CiliumEndpointSlice feature is enabled and cilium agent watch for CiliumEndpointSlice instead of CiliumEndpoint to update the IPCache.")
+	flags.Bool(option.EnableCiliumEndpointSlice, false, "Enable the CiliumEndpointSlice watcher in place of the CiliumEndpoint watcher (beta)")
 	option.BindEnv(Vp, option.EnableCiliumEndpointSlice)
 
 	flags.Bool(option.EnableK8sTerminatingEndpoint, true, "Enable auto-detect of terminating endpoint condition")
@@ -1153,9 +1156,6 @@ func initEnv() {
 
 	var debugDatapath bool
 
-	// Not running tests -> enable the monitor agent.
-	option.Config.RunMonitorAgent = true
-
 	option.LogRegisteredOptions(Vp, log)
 
 	sysctl.SetProcfs(option.Config.ProcFs)
@@ -1196,27 +1196,6 @@ func initEnv() {
 		loadinfo.StartBackgroundLogger()
 	}
 
-	if option.Config.DisableEnvoyVersionCheck {
-		log.Info("Envoy version check disabled")
-	} else {
-		envoyVersion := envoy.GetEnvoyVersion()
-		log.Infof("%s", envoyVersion)
-
-		envoyVersionArray := strings.Fields(envoyVersion)
-		if len(envoyVersionArray) < 3 {
-			log.Fatal("Truncated Envoy version string, cannot verify version match.")
-		}
-		// Make sure Envoy version matches ours
-		if !strings.HasPrefix(envoyVersionArray[2], envoy.RequiredEnvoyVersionSHA) {
-			log.Fatalf("Envoy version %s does not match with required version %s ,aborting.",
-				envoyVersionArray[2], envoy.RequiredEnvoyVersionSHA)
-		}
-	}
-
-	if option.Config.PProf {
-		pprof.Enable(option.Config.PProfAddress, option.Config.PProfPort)
-	}
-
 	if option.Config.PreAllocateMaps {
 		bpf.EnableMapPreAllocation()
 	}
@@ -1250,6 +1229,12 @@ func initEnv() {
 	// Restore permissions of executable files
 	if err := restoreExecPermissions(option.Config.LibDir, `.*\.sh`); err != nil {
 		scopedLog.WithError(err).Fatal("Unable to restore agent asset permissions")
+	}
+
+	// Creating Envoy sockets directory for cases which doesn't provide a volume mount
+	// (e.g. embedded Envoy, external workload in ClusterMesh scenario)
+	if err := os.MkdirAll(envoy.GetSocketDir(option.Config.RunDir), defaults.RuntimePathRights); err != nil {
+		scopedLog.WithError(err).Fatal("Could not create envoy sockets directory")
 	}
 
 	if option.Config.MaxControllerInterval < 0 {
@@ -1327,9 +1312,6 @@ func initEnv() {
 
 	switch option.Config.DatapathMode {
 	case datapathOption.DatapathModeVeth:
-		if option.Config.Tunnel == "" {
-			option.Config.Tunnel = option.TunnelVXLAN
-		}
 	case datapathOption.DatapathModeLBOnly:
 		log.Info("Running in LB-only mode")
 		if option.Config.NodePortAcceleration != option.NodePortAccelerationDisabled {
@@ -1342,7 +1324,7 @@ func initEnv() {
 		option.Config.EnableHostPort = false
 		option.Config.EnableNodePort = true
 		option.Config.EnableExternalIPs = true
-		option.Config.Tunnel = option.TunnelDisabled
+		option.Config.RoutingMode = option.RoutingModeNative
 		option.Config.EnableHealthChecking = false
 		option.Config.EnableIPv4Masquerade = false
 		option.Config.EnableIPv6Masquerade = false
@@ -1384,14 +1366,10 @@ func initEnv() {
 	}
 
 	initClockSourceOption()
-	initSockmapOption()
 
 	if option.Config.EnableSRv6 {
 		if !option.Config.EnableIPv6 {
 			log.Fatalf("SRv6 requires IPv6.")
-		}
-		if probes.HaveMapType(ebpf.LRUHash) != nil {
-			log.Fatalf("SRv6 requires support for BPF LRU maps (Linux 4.10 or later).")
 		}
 	}
 
@@ -1412,6 +1390,27 @@ func initEnv() {
 
 	if option.Config.EnableIPv6Masquerade && option.Config.EnableBPFMasquerade {
 		log.Fatal("BPF masquerade is not supported for IPv6.")
+	}
+
+	if option.Config.EnableHighScaleIPcache {
+		if option.Config.TunnelingEnabled() {
+			log.Fatal("The high-scale IPcache mode requires native routing.")
+		}
+		if option.Config.EnableIPv4EgressGateway {
+			log.Fatal("The egress gateway is not supported in high scale IPcache mode.")
+		}
+		if option.Config.EnableIPSec {
+			log.Fatal("IPsec is not supported in high scale IPcache mode.")
+		}
+		if option.Config.EnableIPv6 {
+			log.Fatal("The high-scale IPcache mode is not supported with IPv6.")
+		}
+		if !option.Config.EnableWellKnownIdentities {
+			log.Fatal("The high-scale IPcache mode requires well-known identities to be enabled.")
+		}
+		if err := probes.HaveOuterSourceIPSupport(); err != nil {
+			log.WithError(err).Fatal("The high scale IPcache mode needs support in the kernel to set the outer source IP address.")
+		}
 	}
 
 	// If there is one device specified, use it to derive better default
@@ -1446,11 +1445,6 @@ func initEnv() {
 	if option.Config.EnableIPv4FragmentsTracking {
 		if !option.Config.EnableIPv4 {
 			option.Config.EnableIPv4FragmentsTracking = false
-		} else {
-			if probes.HaveMapType(ebpf.LRUHash) != nil {
-				option.Config.EnableIPv4FragmentsTracking = false
-				log.Info("Disabled support for IPv4 fragments due to missing kernel support for BPF LRU maps")
-			}
 		}
 	}
 
@@ -1486,12 +1480,12 @@ func initEnv() {
 		)
 	}
 
-	if option.Config.IPAM == ipamOption.IPAMClusterPoolV2 {
+	if option.Config.IPAM == ipamOption.IPAMClusterPoolV2 || option.Config.IPAM == ipamOption.IPAMMultiPool {
 		if option.Config.TunnelingEnabled() {
-			log.Fatalf("Cannot specify IPAM mode %s in tunnel mode.", ipamOption.IPAMClusterPoolV2)
+			log.Fatalf("Cannot specify IPAM mode %s in tunnel mode.", option.Config.IPAM)
 		}
 		if option.Config.EnableIPSec {
-			log.Fatalf("Cannot specify IPAM mode %s with %s.", ipamOption.IPAMClusterPoolV2, option.EnableIPSecName)
+			log.Fatalf("Cannot specify IPAM mode %s with %s.", option.Config.IPAM, option.EnableIPSecName)
 		}
 	}
 
@@ -1575,7 +1569,7 @@ func (d *Daemon) initKVStore() {
 		)
 		log := log.WithField(logfields.LogSubsys, "etcd")
 		goopts.DialOption = []grpc.DialOption{
-			grpc.WithContextDialer(k8s.CreateCustomDialer(&d.k8sWatcher.K8sSvcCache, log)),
+			grpc.WithContextDialer(k8s.CreateCustomDialer(d.k8sWatcher.K8sSvcCache, log)),
 		}
 	}
 
@@ -1590,55 +1584,6 @@ func (d *Daemon) initKVStore() {
 	}
 }
 
-func newWireguardAgent(lc hive.Lifecycle) *wg.Agent {
-	var wgAgent *wireguard.Agent
-	if option.Config.EnableWireguard {
-		if option.Config.EnableIPSec {
-			log.Fatalf("Wireguard (--%s) cannot be used with IPSec (--%s)",
-				option.EnableWireguard, option.EnableIPSecName)
-		}
-
-		var err error
-		privateKeyPath := filepath.Join(option.Config.StateDir, wireguardTypes.PrivKeyFilename)
-		wgAgent, err = wireguard.NewAgent(privateKeyPath)
-		if err != nil {
-			log.Fatalf("failed to initialize wireguard: %s", err)
-		}
-
-		lc.Append(hive.Hook{
-			OnStop: func(hive.HookContext) error {
-				wgAgent.Close()
-				return nil
-			},
-		})
-	} else {
-		// Delete wireguard device from previous run (if such exists)
-		link.DeleteByName(wireguardTypes.IfaceName)
-	}
-	return wgAgent
-}
-
-func newDatapath(lc hive.Lifecycle, wgAgent *wireguard.Agent) datapath.Datapath {
-	datapathConfig := linuxdatapath.DatapathConfiguration{
-		HostDevice: defaults.HostDevice,
-		ProcFs:     option.Config.ProcFs,
-	}
-
-	iptablesManager := &iptables.IptablesManager{}
-
-	lc.Append(hive.Hook{
-		OnStart: func(hive.HookContext) error {
-			if err := enableIPForwarding(); err != nil {
-				log.Fatalf("enabling IP forwarding via sysctl failed: %s", err)
-			}
-
-			iptablesManager.Init()
-			return nil
-		}})
-
-	return linuxdatapath.NewDatapath(datapathConfig, iptablesManager, wgAgent)
-}
-
 // daemonCell wraps the existing implementation of the cilium-agent that has
 // not yet been converted into a cell. Provides *Daemon as a Promise that is
 // resolved once daemon has been started to facilitate conversion into modules.
@@ -1647,25 +1592,38 @@ var daemonCell = cell.Module(
 	"Legacy Daemon",
 
 	cell.Provide(newDaemonPromise),
+	cell.Provide(func() k8s.CacheStatus { return make(k8s.CacheStatus) }),
 	cell.Invoke(func(promise.Promise[*Daemon]) {}), // Force instantiation.
 )
 
 type daemonParams struct {
 	cell.In
 
-	Lifecycle       hive.Lifecycle
-	Clientset       k8sClient.Clientset
-	Datapath        datapath.Datapath
-	WGAgent         *wg.Agent `optional:"true"`
-	LocalNodeStore  node.LocalNodeStore
-	BGPController   *bgpv1.Controller
-	Shutdowner      hive.Shutdowner
-	SharedResources k8s.SharedResources
-	NodeManager     nodeManager.NodeManager
-	EndpointManager endpointmanager.EndpointManager
-	CertManager     certificatemanager.CertificateManager
-	SecretManager   certificatemanager.SecretManager
-	AuthManager     auth.Manager
+	Lifecycle            hive.Lifecycle
+	Clientset            k8sClient.Clientset
+	Datapath             datapath.Datapath
+	WGAgent              *wireguard.Agent `optional:"true"`
+	LocalNodeStore       node.LocalNodeStore
+	BGPController        *bgpv1.Controller
+	Shutdowner           hive.Shutdowner
+	Resources            agentK8s.Resources
+	CacheStatus          k8s.CacheStatus
+	NodeManager          nodeManager.NodeManager
+	EndpointManager      endpointmanager.EndpointManager
+	CertManager          certificatemanager.CertificateManager
+	SecretManager        certificatemanager.SecretManager
+	IdentityAllocator    CachingIdentityAllocator
+	Policy               *policy.Repository
+	PolicyUpdater        *policy.Updater
+	IPCache              *ipcache.IPCache
+	EgressGatewayManager *egressgateway.Manager
+	IPAMMetadataManager  *ipamMetadata.Manager
+	CNIConfigManager     cni.CNIConfigManager
+	SwaggerSpec          *server.Spec
+	HealthAPISpec        *healthApi.Spec
+	ServiceCache         *k8s.ServiceCache
+	ClusterMesh          *clustermesh.ClusterMesh
+	MonitorAgent         monitorAgent.Agent
 }
 
 func newDaemonPromise(params daemonParams) promise.Promise[*Daemon] {
@@ -1687,18 +1645,7 @@ func newDaemonPromise(params daemonParams) promise.Promise[*Daemon] {
 
 	params.Lifecycle.Append(hive.Hook{
 		OnStart: func(hive.HookContext) error {
-			d, restoredEndpoints, err := newDaemon(
-				daemonCtx, cleaner,
-				params.EndpointManager,
-				params.NodeManager,
-				params.Datapath,
-				params.WGAgent,
-				params.Clientset,
-				params.SharedResources,
-				params.CertManager,
-				params.SecretManager,
-				params.LocalNodeStore,
-				params.AuthManager)
+			d, restoredEndpoints, err := newDaemon(daemonCtx, cleaner, &params)
 			if err != nil {
 				return fmt.Errorf("daemon creation failed: %w", err)
 			}
@@ -1749,7 +1696,7 @@ func runDaemon(d *Daemon, restoredEndpoints *endpointRestoreState, cleaner *daem
 	if params.Clientset.IsEnabled() {
 		// Wait only for certain caches, but not all!
 		// (Check Daemon.InitK8sSubsystem() for more info)
-		<-d.k8sCachesSynced
+		<-params.CacheStatus
 	}
 	bootstrapStats.k8sInit.End(true)
 	restoreComplete := d.initRestore(restoredEndpoints)
@@ -1785,7 +1732,9 @@ func runDaemon(d *Daemon, restoredEndpoints *endpointRestoreState, cleaner *daem
 			<-restoreComplete
 		}
 
-		if params.Clientset.IsEnabled() {
+		// Only attempt CEP cleanup if cilium endpoint CRD is not disabled, otherwise the cep/ces
+		// watchers/indexers will not be initialized.
+		if params.Clientset.IsEnabled() && option.Config.EnableStaleCiliumEndpointCleanup && !option.Config.DisableCiliumEndpointCRD {
 			// Use restored endpoints to delete local CiliumEndpoints which are not in the restored endpoint cache.
 			// This will clear out any CiliumEndpoints that may be stale.
 			// Likely causes for this are Pods having their init container restarted or the node being restarted.
@@ -1856,7 +1805,7 @@ func runDaemon(d *Daemon, restoredEndpoints *endpointRestoreState, cleaner *daem
 
 	bootstrapStats.healthCheck.Start()
 	if option.Config.EnableHealthChecking {
-		d.initHealth(cleaner)
+		d.initHealth(params.HealthAPISpec, cleaner)
 	}
 	bootstrapStats.healthCheck.End(true)
 
@@ -1864,7 +1813,7 @@ func runDaemon(d *Daemon, restoredEndpoints *endpointRestoreState, cleaner *daem
 
 	go func(errs <-chan error) {
 		err := <-errs
-		if err != nil {
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.WithError(err).Error("Cannot start metrics server")
 			params.Shutdowner.Shutdown(hive.ShutdownWithError(err))
 		}
@@ -1877,8 +1826,18 @@ func runDaemon(d *Daemon, restoredEndpoints *endpointRestoreState, cleaner *daem
 		}
 	}
 
+	// Process queued deletion requests
+	bootstrapStats.deleteQueue.Start()
+	unlockDeleteDir := d.processQueuedDeletes()
+	bootstrapStats.deleteQueue.End(true)
+
+	// Assign the BGP Control to the struct field so non-modularized components can interact with the BGP Controller
+	// like they are used to.
+	d.bgpControlPlaneController = params.BGPController
+
+	// Start up the local api socket
 	bootstrapStats.initAPI.Start()
-	srv := server.NewServer(d.instantiateAPI())
+	srv := server.NewServer(d.instantiateAPI(params.SwaggerSpec))
 	srv.EnabledListeners = []string{"unix"}
 	srv.SocketPath = option.Config.SocketPath
 	srv.ReadTimeout = apiTimeout
@@ -1886,6 +1845,7 @@ func runDaemon(d *Daemon, restoredEndpoints *endpointRestoreState, cleaner *daem
 	cleaner.cleanupFuncs.Add(func() { srv.Shutdown() })
 
 	srv.ConfigureAPI()
+	unlockDeleteDir() // can't unlock this until the api socket is written
 	bootstrapStats.initAPI.End(true)
 
 	err := d.SendNotification(monitorAPI.StartMessage(time.Now()))
@@ -1894,28 +1854,22 @@ func runDaemon(d *Daemon, restoredEndpoints *endpointRestoreState, cleaner *daem
 	}
 
 	if option.Config.DatapathMode != datapathOption.DatapathModeLBOnly {
-		if !d.datapath.Node().NodeNeighDiscoveryEnabled() {
+		if !d.datapath.NodeNeighbors().NodeNeighDiscoveryEnabled() {
 			// Remove all non-GC'ed neighbor entries that might have previously set
 			// by a Cilium instance.
-			d.datapath.Node().NodeCleanNeighbors(false)
+			d.datapath.NodeNeighbors().NodeCleanNeighbors(false)
 		} else {
 			// If we came from an agent upgrade, migrate entries.
-			d.datapath.Node().NodeCleanNeighbors(true)
+			d.datapath.NodeNeighbors().NodeCleanNeighbors(true)
 			// Start periodical refresh of the neighbor table from the agent if needed.
 			if option.Config.ARPPingRefreshPeriod != 0 && !option.Config.ARPPingKernelManaged {
-				d.nodeDiscovery.Manager.StartNeighborRefresh(d.datapath.Node())
+				d.nodeDiscovery.Manager.StartNeighborRefresh(d.datapath.NodeNeighbors())
 			}
 		}
 	}
 
-	// Assign the BGP Control to the struct field so non-modularized components can interact with the BGP Controller
-	// like they are used to.
-	d.bgpControlPlaneController = params.BGPController
-
 	log.WithField("bootstrapTime", time.Since(bootstrapTimestamp)).
 		Info("Daemon initialization completed")
-
-	d.startCNIConfWriter(option.Config, cleaner)
 
 	bootstrapStats.overall.End(true)
 	bootstrapStats.updateMetrics()
@@ -1938,14 +1892,9 @@ func runDaemon(d *Daemon, restoredEndpoints *endpointRestoreState, cleaner *daem
 	}
 }
 
-func (d *Daemon) instantiateAPI() *restapi.CiliumAPIAPI {
-	swaggerSpec, err := loads.Analyzed(server.SwaggerJSON, "")
-	if err != nil {
-		log.WithError(err).Fatal("Cannot load swagger spec")
-	}
-
+func (d *Daemon) instantiateAPI(swaggerSpec *server.Spec) *restapi.CiliumAPIAPI {
 	log.Info("Initializing Cilium API")
-	restAPI := restapi.NewCiliumAPIAPI(swaggerSpec)
+	restAPI := restapi.NewCiliumAPIAPI(swaggerSpec.Document)
 
 	restAPI.Logger = log.Infof
 
@@ -2057,22 +2006,31 @@ func (d *Daemon) instantiateAPI() *restapi.CiliumAPIAPI {
 	restAPI.PolicyGetIPHandler = NewGetIPHandler(d)
 
 	// /node/ids
-	restAPI.DaemonGetNodeIdsHandler = NewGetNodeIDsHandler(d.datapath.Node())
+	restAPI.DaemonGetNodeIdsHandler = NewGetNodeIDsHandler(d.datapath.NodeIDs())
+
+	// /bgp/peers
+	restAPI.BgpGetBgpPeersHandler = NewGetBGPHandler(d.bgpControlPlaneController)
+
+	msg := "Required API option %s is disabled. This may prevent Cilium from operating correctly"
+	hint := "Consider enabling this API in " + server.AdminEnableFlag
+	for _, requiredAPI := range []string{
+		"GetConfig",        // CNI: Used to detect detect IPAM mode
+		"GetHealthz",       // Kubelet: daemon health checks
+		"PutEndpointID",    // CNI: Provision the network for a new Pod
+		"DeleteEndpointID", // CNI: Clean up networking for a deleted Pod
+		"PostIPAM",         // CNI: Reserve IPs for new Pods
+		"DeleteIPAMIP",     // CNI: Release IPs for deleted Pods
+	} {
+		if _, denied := swaggerSpec.DeniedAPIs[requiredAPI]; denied {
+			log.WithFields(logrus.Fields{
+				logfields.Hint:   hint,
+				logfields.Params: requiredAPI,
+			}).Warning(msg)
+		}
+	}
+	api.DisableAPIs(swaggerSpec.DeniedAPIs, restAPI.AddMiddlewareFor)
 
 	return restAPI
-}
-
-func initSockmapOption() {
-	if !option.Config.SockopsEnable {
-		return
-	}
-	if probes.HaveMapType(ebpf.SockHash) == nil &&
-		probes.HaveProgramType(ebpf.SockOps) == nil &&
-		probes.HaveProgramType(ebpf.SkMsg) == nil {
-		return
-	}
-	log.Warn("BPF Sock ops not supported by kernel. Disabling '--sockops-enable' feature.")
-	option.Config.SockopsEnable = false
 }
 
 func initClockSourceOption() {
@@ -2088,10 +2046,16 @@ func initClockSourceOption() {
 
 	if option.Config.EnableBPFClockProbe {
 		if probes.HaveProgramHelper(ebpf.XDP, asm.FnJiffies64) == nil {
-			t, err := bpf.GetJtime()
+			t, err := probes.Jiffies()
 			if err == nil && t > 0 {
 				option.Config.ClockSource = option.ClockSourceJiffies
+			} else {
+				log.WithError(err).Warningf("Auto-disabling %q feature since kernel doesn't expose jiffies", option.EnableBPFClockProbe)
+				option.Config.EnableBPFClockProbe = false
 			}
+		} else {
+			log.WithError(err).Warningf("Auto-disabling %q feature since kernel support is missing (Linux 5.5 or later required).", option.EnableBPFClockProbe)
+			option.Config.EnableBPFClockProbe = false
 		}
 	}
 }

@@ -594,7 +594,17 @@ func (a *Agent) Status(withPeers bool) (*models.WireguardStatus, error) {
 		}
 	}
 
+	var nodeEncryptionStatus = "Disabled"
+	if option.Config.EncryptNode {
+		if node.GetOptOutNodeEncryption() {
+			nodeEncryptionStatus = "OptedOut"
+		} else {
+			nodeEncryptionStatus = "Enabled"
+		}
+	}
+
 	status := &models.WireguardStatus{
+		NodeEncryption: nodeEncryptionStatus,
 		Interfaces: []*models.WireguardInterface{{
 			Name:       dev.Name,
 			ListenPort: int64(dev.ListenPort),
@@ -664,7 +674,7 @@ func deleteObsoleteIPRules() {
 		Table:  linux_defaults.RouteTableWireguard,
 	}
 	if option.Config.EnableIPv4 {
-		route.DeleteRule(rule)
+		route.DeleteRule(netlink.FAMILY_V4, rule)
 
 		subnet := net.IPNet{
 			IP:   net.IPv4zero,
@@ -674,7 +684,7 @@ func deleteObsoleteIPRules() {
 		route.Delete(rt)
 	}
 	if option.Config.EnableIPv6 {
-		route.DeleteRuleIPv6(rule)
+		route.DeleteRule(netlink.FAMILY_V6, rule)
 
 		subnet := net.IPNet{
 			IP:   net.IPv6zero,

@@ -7,9 +7,8 @@ import (
 	"context"
 	"io"
 
-	"github.com/cilium/cilium/pkg/datapath"
 	"github.com/cilium/cilium/pkg/datapath/loader/metrics"
-	"github.com/cilium/cilium/pkg/datapath/types"
+	datapath "github.com/cilium/cilium/pkg/datapath/types"
 	"github.com/cilium/cilium/pkg/testutils/mockmaps"
 )
 
@@ -17,7 +16,7 @@ var _ datapath.Datapath = (*FakeDatapath)(nil)
 
 type FakeDatapath struct {
 	node           *FakeNodeHandler
-	nodeAddressing types.NodeAddressing
+	nodeAddressing datapath.NodeAddressing
 	loader         datapath.Loader
 	lbmap          *mockmaps.LBMockMap
 }
@@ -37,13 +36,21 @@ func (f *FakeDatapath) Node() datapath.NodeHandler {
 	return f.node
 }
 
+func (f *FakeDatapath) NodeIDs() datapath.NodeIDHandler {
+	return f.node
+}
+
+func (f *FakeDatapath) NodeNeighbors() datapath.NodeNeighbors {
+	return f.node
+}
+
 func (f *FakeDatapath) FakeNode() *FakeNodeHandler {
 	return f.node
 }
 
 // LocalNodeAddressing returns a fake node addressing implementation of the
 // local node
-func (f *FakeDatapath) LocalNodeAddressing() types.NodeAddressing {
+func (f *FakeDatapath) LocalNodeAddressing() datapath.NodeAddressing {
 	return f.nodeAddressing
 }
 
@@ -67,7 +74,7 @@ func (f *FakeDatapath) WriteEndpointConfig(io.Writer, datapath.EndpointConfigura
 	return nil
 }
 
-func (f *FakeDatapath) InstallProxyRules(context.Context, uint16, bool, string) error {
+func (f *FakeDatapath) InstallProxyRules(context.Context, uint16, bool, bool, string) error {
 	return nil
 }
 
@@ -103,7 +110,7 @@ func (f *FakeDatapath) Procfs() string {
 	return "/proc"
 }
 
-func (f *FakeDatapath) LBMap() types.LBMap {
+func (f *FakeDatapath) LBMap() datapath.LBMap {
 	return f.lbmap
 }
 

@@ -16,13 +16,15 @@ import (
 
 	"github.com/cilium/cilium/pkg/bpf"
 	"github.com/cilium/cilium/pkg/byteorder"
-	"github.com/cilium/cilium/pkg/datapath"
 	"github.com/cilium/cilium/pkg/datapath/link"
+	"github.com/cilium/cilium/pkg/datapath/linux/linux_defaults"
 	"github.com/cilium/cilium/pkg/datapath/linux/route"
 	"github.com/cilium/cilium/pkg/datapath/loader/metrics"
+	datapath "github.com/cilium/cilium/pkg/datapath/types"
 	"github.com/cilium/cilium/pkg/defaults"
 	"github.com/cilium/cilium/pkg/elf"
 	iputil "github.com/cilium/cilium/pkg/ip"
+	"github.com/cilium/cilium/pkg/lock"
 	"github.com/cilium/cilium/pkg/logging"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/maps/callsmap"
@@ -45,6 +47,9 @@ const (
 
 	symbolFromHostNetdevXDP = "cil_xdp_entry"
 
+	symbolFromOverlay = "cil_from_overlay"
+	symbolToOverlay   = "cil_to_overlay"
+
 	dirIngress = "ingress"
 	dirEgress  = "egress"
 )
@@ -63,6 +68,8 @@ type Loader struct {
 
 	// templateCache is the cache of pre-compiled datapaths.
 	templateCache *objectCache
+
+	ipsecMu lock.Mutex // guards reinitializeIPSec
 }
 
 // NewLoader returns a new loader.
@@ -89,6 +96,7 @@ func upsertEndpointRoute(ep datapath.Endpoint, ip net.IPNet) error {
 		Prefix: ip,
 		Device: ep.InterfaceName(),
 		Scope:  netlink.SCOPE_LINK,
+		Proto:  linux_defaults.RTProto,
 	}
 
 	return route.Upsert(endpointRoute)
@@ -148,10 +156,10 @@ func patchHostNetdevDatapath(ep datapath.Endpoint, objPath, dstPath, ifName stri
 	if mac == nil {
 		// L2-less device
 		mac = make([]byte, 6)
-		opts["ETH_HLEN"] = uint32(0)
+		opts["ETH_HLEN"] = uint64(0)
 	}
-	opts["NODE_MAC_1"] = sliceToBe32(mac[0:4])
-	opts["NODE_MAC_2"] = uint32(sliceToBe16(mac[4:6]))
+	opts["NODE_MAC_1"] = uint64(sliceToBe32(mac[0:4]))
+	opts["NODE_MAC_2"] = uint64(sliceToBe16(mac[4:6]))
 
 	ifIndex, err := link.GetIfIndex(ifName)
 	if err != nil {
@@ -159,18 +167,18 @@ func patchHostNetdevDatapath(ep datapath.Endpoint, objPath, dstPath, ifName stri
 	}
 
 	if !option.Config.EnableHostLegacyRouting {
-		opts["SECCTX_FROM_IPCACHE"] = uint32(SecctxFromIpcacheEnabled)
+		opts["SECCTX_FROM_IPCACHE"] = uint64(SecctxFromIpcacheEnabled)
 	} else {
-		opts["SECCTX_FROM_IPCACHE"] = uint32(SecctxFromIpcacheDisabled)
+		opts["SECCTX_FROM_IPCACHE"] = uint64(SecctxFromIpcacheDisabled)
 	}
 
 	if option.Config.EnableNodePort {
-		opts["NATIVE_DEV_IFINDEX"] = ifIndex
+		opts["NATIVE_DEV_IFINDEX"] = uint64(ifIndex)
 	}
 	if option.Config.EnableIPv4Masquerade && option.Config.EnableBPFMasquerade && bpfMasqIPv4Addrs != nil {
 		if option.Config.EnableIPv4 {
 			ipv4 := bpfMasqIPv4Addrs[ifName]
-			opts["IPV4_MASQUERADE"] = byteorder.NetIPv4ToHost32(ipv4)
+			opts["IPV4_MASQUERADE"] = uint64(byteorder.NetIPv4ToHost32(ipv4))
 		}
 	}
 
@@ -339,18 +347,36 @@ func (l *Loader) reloadDatapath(ctx context.Context, ep datapath.Endpoint, dirs 
 }
 
 func (l *Loader) replaceNetworkDatapath(ctx context.Context, interfaces []string) error {
-	if err := compileNetwork(ctx); err != nil {
-		log.WithError(err).Fatal("failed to compile encryption programs")
-	}
 	progs := []progDefinition{{progName: symbolFromNetwork, direction: dirIngress}}
 	for _, iface := range option.Config.EncryptInterface {
 		finalize, err := replaceDatapath(ctx, iface, networkObj, progs, "")
 		if err != nil {
 			log.WithField(logfields.Interface, iface).WithError(err).Fatal("Load encryption network failed")
 		}
+		log.WithField(logfields.Interface, iface).Info("Encryption network program (re)loaded")
+
 		// Defer map removal until all interfaces' progs have been replaced.
 		defer finalize()
 	}
+	return nil
+}
+
+func (l *Loader) replaceOverlayDatapath(ctx context.Context, cArgs []string, iface string) error {
+	if err := compileOverlay(ctx, cArgs); err != nil {
+		log.WithError(err).Fatal("failed to compile overlay programs")
+	}
+
+	progs := []progDefinition{
+		{progName: symbolFromOverlay, direction: dirIngress},
+		{progName: symbolToOverlay, direction: dirEgress},
+	}
+
+	finalize, err := replaceDatapath(ctx, iface, overlayObj, progs, "")
+	if err != nil {
+		log.WithField(logfields.Interface, iface).WithError(err).Fatal("Load overlay network failed")
+	}
+	finalize()
+
 	return nil
 }
 

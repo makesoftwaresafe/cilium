@@ -42,6 +42,7 @@
     - [Workload](#flow-Workload)
   
     - [AgentEventType](#flow-AgentEventType)
+    - [AuthType](#flow-AuthType)
     - [DebugCapturePoint](#flow-DebugCapturePoint)
     - [DebugEventType](#flow-DebugEventType)
     - [DropReason](#flow-DropReason)
@@ -267,6 +268,7 @@ EventTypeFilter is a filter describing a particular event type
 | uuid | [string](#string) |  | uuid is a universally unique identifier for this flow. |
 | verdict | [Verdict](#flow-Verdict) |  |  |
 | drop_reason | [uint32](#uint32) |  | **Deprecated.** only applicable to Verdict = DROPPED. deprecated in favor of drop_reason_desc. |
+| auth_type | [AuthType](#flow-AuthType) |  | auth_type is the authentication type specified for the flow in Cilium Network Policy. Only set on policy verdict events. |
 | ethernet | [Ethernet](#flow-Ethernet) |  | l2 |
 | IP | [IP](#flow-IP) |  | l3 |
 | l4 | [Layer4](#flow-Layer4) |  | l4 |
@@ -794,6 +796,20 @@ AgentNotification in pkg/monitor/api/types.go
 
 
 
+<a name="flow-AuthType"></a>
+
+### AuthType
+These types correspond to definitions in pkg/policy/l4.go
+
+| Name | Number | Description |
+| ---- | ------ | ----------- |
+| NONE | 0 |  |
+| NULL | 1 |  |
+| MTLS_SPIFFE | 2 |  |
+| ALWAYS_FAIL | 3 |  |
+
+
+
 <a name="flow-DebugCapturePoint"></a>
 
 ### DebugCapturePoint
@@ -957,6 +973,11 @@ here.
 | NAT46 | 187 |  |
 | NAT64 | 188 |  |
 | AUTH_REQUIRED | 189 |  |
+| CT_NO_MAP_FOUND | 190 |  |
+| SNAT_NO_MAP_FOUND | 191 |  |
+| INVALID_CLUSTER_ID | 192 |  |
+| UNSUPPORTED_PROTOCOL_FOR_DSR_ENCAP | 193 |  |
+| NO_EGRESS_GATEWAY | 194 |  |
 
 
 

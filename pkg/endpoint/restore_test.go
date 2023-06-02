@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright Authors of Cilium
 
-//go:build integration_tests
-
 package endpoint
 
 import (
@@ -14,11 +12,10 @@ import (
 	"path/filepath"
 	"sort"
 
-	. "gopkg.in/check.v1"
+	. "github.com/cilium/checkmate"
 
 	"github.com/cilium/cilium/pkg/checker"
 	linuxDatapath "github.com/cilium/cilium/pkg/datapath/linux"
-	"github.com/cilium/cilium/pkg/endpoint/regeneration"
 	"github.com/cilium/cilium/pkg/identity"
 	"github.com/cilium/cilium/pkg/labels"
 	"github.com/cilium/cilium/pkg/mac"
@@ -77,13 +74,6 @@ func (ds *EndpointSuite) endpointCreator(id uint16, secID identity.NumericIdenti
 	return ep
 }
 
-var (
-	regenerationMetadata = &regeneration.ExternalRegenerationMetadata{
-		Reason:            "test",
-		RegenerationLevel: regeneration.RegenerateWithoutDatapath,
-	}
-)
-
 func (ds *EndpointSuite) TestReadEPsFromDirNames(c *C) {
 	// For this test, the real linux datapath is necessary to properly
 	// serialize config files to disk and test the restore.
@@ -91,7 +81,7 @@ func (ds *EndpointSuite) TestReadEPsFromDirNames(c *C) {
 	defer func() {
 		ds.datapath = oldDatapath
 	}()
-	ds.datapath = linuxDatapath.NewDatapath(linuxDatapath.DatapathConfiguration{}, nil, nil)
+	ds.datapath = linuxDatapath.NewDatapath(linuxDatapath.DatapathConfiguration{}, nil, nil, nil)
 
 	epsWanted, _ := ds.createEndpoints()
 	tmpDir, err := os.MkdirTemp("", "cilium-tests")
@@ -161,7 +151,7 @@ func (ds *EndpointSuite) TestReadEPsFromDirNamesWithRestoreFailure(c *C) {
 	defer func() {
 		ds.datapath = oldDatapath
 	}()
-	ds.datapath = linuxDatapath.NewDatapath(linuxDatapath.DatapathConfiguration{}, nil, nil)
+	ds.datapath = linuxDatapath.NewDatapath(linuxDatapath.DatapathConfiguration{}, nil, nil, nil)
 
 	eps, _ := ds.createEndpoints()
 	ep := eps[0]
@@ -227,7 +217,7 @@ func (ds *EndpointSuite) BenchmarkReadEPsFromDirNames(c *C) {
 	defer func() {
 		ds.datapath = oldDatapath
 	}()
-	ds.datapath = linuxDatapath.NewDatapath(linuxDatapath.DatapathConfiguration{}, nil, nil)
+	ds.datapath = linuxDatapath.NewDatapath(linuxDatapath.DatapathConfiguration{}, nil, nil, nil)
 
 	epsWanted, _ := ds.createEndpoints()
 	tmpDir, err := os.MkdirTemp("", "cilium-tests")

@@ -118,22 +118,6 @@ func ReadEPsFromDirNames(ctx context.Context, owner regeneration.Owner, policyGe
 			continue
 		}
 
-		// This symlink is only needed when upgrading from a pre-1.11 Cilium
-		// and we can thus remove it once Cilium v1.11 is the oldest supported
-		// version.
-		oldCHeaderFile := filepath.Join(epDir, oldCHeaderFileName)
-		if _, err := os.Stat(oldCHeaderFile); err != nil {
-			if !os.IsNotExist(err) {
-				scopedLog.WithError(err).Warn("Failed to check if old C header exists. Ignoring endpoint")
-				continue
-			}
-			if err := os.Symlink(common.CHeaderFileName, oldCHeaderFile); err != nil {
-				scopedLog.WithError(err).Warn("Failed to create symlink for C header. Ignoring endpoint")
-				continue
-			}
-			scopedLog.Debug("Created symlink for endpoint C header file")
-		}
-
 		scopedLog.Debug("Found endpoint C header file")
 
 		bEp, err := getCiliumVersionString(cHeaderFile)
@@ -389,7 +373,9 @@ func (e *Endpoint) toSerializedEndpoint() *serializableEndpoint {
 		OpLabels:              e.OpLabels,
 		LXCMAC:                e.mac,
 		IPv6:                  e.IPv6,
+		IPv6IPAMPool:          e.IPv6IPAMPool,
 		IPv4:                  e.IPv4,
+		IPv4IPAMPool:          e.IPv4IPAMPool,
 		NodeMAC:               e.nodeMAC,
 		SecurityIdentity:      e.SecurityIdentity,
 		Options:               e.Options,
@@ -451,8 +437,14 @@ type serializableEndpoint struct {
 	// IPv6 is the IPv6 address of the endpoint
 	IPv6 netip.Addr
 
+	// IPv6IPAMPool is the IPAM address pool from which the IPv6 address was allocated
+	IPv6IPAMPool string
+
 	// IPv4 is the IPv4 address of the endpoint
 	IPv4 netip.Addr
+
+	// IPv4IPAMPool is the IPAM address pool from which the IPv4 address was allocated
+	IPv4IPAMPool string
 
 	// nodeMAC is the MAC of the node (agent). The MAC is different for every endpoint.
 	NodeMAC mac.MAC
@@ -529,7 +521,9 @@ func (ep *Endpoint) fromSerializedEndpoint(r *serializableEndpoint) {
 	ep.OpLabels = r.OpLabels
 	ep.mac = r.LXCMAC
 	ep.IPv6 = r.IPv6
+	ep.IPv6IPAMPool = r.IPv6IPAMPool
 	ep.IPv4 = r.IPv4
+	ep.IPv4IPAMPool = r.IPv4IPAMPool
 	ep.nodeMAC = r.NodeMAC
 	ep.SecurityIdentity = r.SecurityIdentity
 	ep.DNSRules = r.DNSRules

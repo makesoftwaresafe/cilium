@@ -49,6 +49,9 @@ repository in the Cilium project:
   code owner is not expected to validate the technical correctness of
   submissions. Correctness is typically handled by another code owner group
   which is also assigned to any given piece of documentation.
+- `@cilium/sig-foundations <https://github.com/orgs/cilium/teams/sig-foundations>`__:
+  Review changes to the core libraries and provide guidance to overall
+  software architecture.
 - `@cilium/github-sec <https://github.com/orgs/cilium/teams/github-sec>`__:
   Responsible for maintaining the security of repositories in the Cilium
   project by maintaining best practices for workflow usage, for instance
@@ -68,6 +71,9 @@ repository in the Cilium project:
   Provide recommendations about the types, names and labels for metrics to
   follow best practices. This includes considering the cardinality impact of
   metrics being added or extended.
+- `@cilium/security <https://github.com/orgs/cilium/teams/security>`__:
+  Provide feedback on changes that could have security implications for Cilium,
+  and maintain security-related documentation.
 - `@cilium/tophat <https://github.com/orgs/cilium/teams/tophat>`__:
   Top Hat duties rotate between the committer group from week to week, and
   they may assist in maintenance, triage and backporting duties across

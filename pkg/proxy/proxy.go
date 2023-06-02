@@ -42,7 +42,7 @@ const (
 )
 
 type DatapathUpdater interface {
-	InstallProxyRules(ctx context.Context, proxyPort uint16, ingress bool, name string) error
+	InstallProxyRules(ctx context.Context, proxyPort uint16, ingress, localOnly bool, name string) error
 	SupportsOriginalSourceAddr() bool
 }
 
@@ -94,15 +94,17 @@ type ProxyPort struct {
 	// is non-zero when a proxy has been successfully created and the
 	// datapath rules have been created.
 	rulesPort uint16
+	// localOnly is true when the proxy port is only accessible from the loopback device
+	localOnly bool
 }
 
 // Proxy maintains state about redirects
 type Proxy struct {
 	*envoy.XDSServer
 
-	// stateDir is the path of the directory where the state of L7 proxies is
+	// runDir is the path of the directory where the state of L7 proxies is
 	// stored.
-	stateDir string
+	runDir string
 
 	// mutex is the lock required when modifying any proxy datastructure
 	mutex lock.RWMutex
@@ -135,14 +137,14 @@ type Proxy struct {
 
 // StartProxySupport starts the servers to support L7 proxies: xDS GRPC server
 // and access log server.
-func StartProxySupport(minPort uint16, maxPort uint16, stateDir string,
+func StartProxySupport(minPort uint16, maxPort uint16, runDir string,
 	accessLogNotifier logger.LogRecordNotifier, accessLogMetadata []string,
 	datapathUpdater DatapathUpdater, mgr EndpointLookup,
 	ipcache IPCacheManager) *Proxy {
 	endpointManager = mgr
 	eir := newEndpointInfoRegistry(ipcache)
 	logger.SetEndpointInfoRegistry(eir)
-	xdsServer := envoy.StartXDSServer(ipcache, stateDir)
+	xdsServer := envoy.StartXDSServer(ipcache, envoy.GetSocketDir(runDir))
 
 	if accessLogNotifier != nil {
 		logger.SetNotifier(accessLogNotifier)
@@ -152,11 +154,11 @@ func StartProxySupport(minPort uint16, maxPort uint16, stateDir string,
 		logger.SetMetadata(accessLogMetadata)
 	}
 
-	envoy.StartAccessLogServer(stateDir, xdsServer)
+	envoy.StartAccessLogServer(envoy.GetSocketDir(runDir), xdsServer)
 
 	return &Proxy{
 		XDSServer:                   xdsServer,
-		stateDir:                    stateDir,
+		runDir:                      runDir,
 		rangeMin:                    minPort,
 		rangeMax:                    maxPort,
 		redirects:                   make(map[string]*Redirect),
@@ -168,13 +170,13 @@ func StartProxySupport(minPort uint16, maxPort uint16, stateDir string,
 
 // Overload XDSServer.UpsertEnvoyResources to start Envoy on demand
 func (p *Proxy) UpsertEnvoyResources(ctx context.Context, resources envoy.Resources, portAllocator envoy.PortAllocator) error {
-	startEnvoy(p.stateDir, p.XDSServer, nil)
+	initEnvoy(p.runDir, p.XDSServer, nil)
 	return p.XDSServer.UpsertEnvoyResources(ctx, resources, portAllocator)
 }
 
 // Overload XDSServer.UpdateEnvoyResources to start Envoy on demand
 func (p *Proxy) UpdateEnvoyResources(ctx context.Context, old, new envoy.Resources, portAllocator envoy.PortAllocator) error {
-	startEnvoy(p.stateDir, p.XDSServer, nil)
+	initEnvoy(p.runDir, p.XDSServer, nil)
 	return p.XDSServer.UpdateEnvoyResources(ctx, old, new, portAllocator)
 }
 
@@ -194,22 +196,27 @@ var (
 		"cilium-http-egress": {
 			proxyType: ProxyTypeHTTP,
 			ingress:   false,
+			localOnly: true,
 		},
 		"cilium-http-ingress": {
 			proxyType: ProxyTypeHTTP,
 			ingress:   true,
+			localOnly: true,
 		},
 		DNSProxyName: {
 			proxyType: ProxyTypeDNS,
 			ingress:   false,
+			localOnly: true,
 		},
 		"cilium-proxylib-egress": {
 			proxyType: ProxyTypeAny,
 			ingress:   false,
+			localOnly: true,
 		},
 		"cilium-proxylib-ingress": {
 			proxyType: ProxyTypeAny,
 			ingress:   true,
+			localOnly: true,
 		},
 	}
 )
@@ -297,7 +304,7 @@ func (p *Proxy) ackProxyPort(ctx context.Context, name string, pp *ProxyPort) er
 		// Add rules for the new port
 		// This should always succeed if we have managed to start-up properly
 		scopedLog.Infof("Adding new proxy port rules for %s:%d", name, pp.proxyPort)
-		if err := p.datapathUpdater.InstallProxyRules(ctx, pp.proxyPort, pp.ingress, name); err != nil {
+		if err := p.datapathUpdater.InstallProxyRules(ctx, pp.proxyPort, pp.ingress, pp.localOnly, name); err != nil {
 			return fmt.Errorf("cannot install proxy rules for %s: %w", name, err)
 		}
 		pp.rulesPort = pp.proxyPort
@@ -397,13 +404,13 @@ func GetProxyPort(name string) (uint16, error) {
 // already allocated.
 // Each call has to be paired with AckProxyPort(name) to update the datapath rules accordingly.
 // Each allocated port must be eventually freed with ReleaseProxyPort().
-func (p *Proxy) AllocateProxyPort(name string, ingress bool) (uint16, error) {
+func (p *Proxy) AllocateProxyPort(name string, ingress, localOnly bool) (uint16, error) {
 	// Accessing pp.proxyPort requires the lock
 	proxyPortsMutex.Lock()
 	defer proxyPortsMutex.Unlock()
 	pp := proxyPorts[name]
 	if pp == nil {
-		pp = &ProxyPort{proxyType: ProxyTypeCRD, ingress: ingress}
+		pp = &ProxyPort{proxyType: ProxyTypeCRD, ingress: ingress, localOnly: localOnly}
 	}
 
 	// Allocate a new port only if a port was never allocated before.
@@ -465,7 +472,7 @@ func (p *Proxy) ReinstallRules(ctx context.Context) error {
 	for name, pp := range proxyPorts {
 		if pp.rulesPort > 0 {
 			// This should always succeed if we have managed to start-up properly
-			if err := p.datapathUpdater.InstallProxyRules(ctx, pp.rulesPort, pp.ingress, name); err != nil {
+			if err := p.datapathUpdater.InstallProxyRules(ctx, pp.rulesPort, pp.ingress, pp.localOnly, name); err != nil {
 				return fmt.Errorf("cannot install proxy rules for %s: %w", name, err)
 			}
 		}
@@ -590,7 +597,7 @@ func (p *Proxy) CreateOrUpdateRedirect(ctx context.Context, l4 policy.ProxyPolic
 				err = nil
 			} else {
 				// create an Envoy Listener for Cilium policy enforcement
-				redir.implementation, err = createEnvoyRedirect(redir, p.stateDir, p.XDSServer, p.datapathUpdater.SupportsOriginalSourceAddr(), wg)
+				redir.implementation, err = createEnvoyRedirect(redir, p.runDir, p.XDSServer, p.datapathUpdater.SupportsOriginalSourceAddr(), wg)
 			}
 		}
 
@@ -709,8 +716,9 @@ func (p *Proxy) removeRedirect(id string, wg *completion.WaitGroup) (err error, 
 
 // ChangeLogLevel changes proxy log level to correspond to the logrus log level 'level'.
 func ChangeLogLevel(level logrus.Level) {
-	if envoyProxy != nil {
-		envoyProxy.ChangeLogLevel(level)
+	if envoyAdminClient != nil {
+		err := envoyAdminClient.ChangeLogLevel(level)
+		log.WithError(err).Debug("failed to change log level in Envoy")
 	}
 }
 
@@ -738,6 +746,10 @@ func (p *Proxy) GetStatusModel() *models.ProxyStatus {
 			ProxyPort: int64(redirect.listener.rulesPort),
 		})
 	}
+	result.EnvoyDeploymentMode = "embedded"
+	if option.Config.ExternalEnvoyProxy {
+		result.EnvoyDeploymentMode = "external"
+	}
 	return result
 }
 
@@ -756,9 +768,4 @@ func (p *Proxy) updateRedirectMetrics() {
 // UpdateNetworkPolicy must update the redirect configuration of an endpoint in the proxy
 func (p *Proxy) UpdateNetworkPolicy(ep logger.EndpointUpdater, vis *policy.VisibilityPolicy, policy *policy.L4Policy, ingressPolicyEnforced, egressPolicyEnforced bool, wg *completion.WaitGroup) (error, func() error) {
 	return p.XDSServer.UpdateNetworkPolicy(ep, vis, policy, ingressPolicyEnforced, egressPolicyEnforced, wg)
-}
-
-// UseCurrentNetworkPolicy inserts a Completion to the WaitGroup if the current network policy has not yet been acked
-func (p *Proxy) UseCurrentNetworkPolicy(ep logger.EndpointUpdater, policy *policy.L4Policy, wg *completion.WaitGroup) {
-	p.XDSServer.UseCurrentNetworkPolicy(ep, policy, wg)
 }

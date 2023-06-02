@@ -4,11 +4,15 @@
 package envoy
 
 import (
+	"reflect"
+	"testing"
+
+	. "github.com/cilium/checkmate"
 	cilium "github.com/cilium/proxy/go/cilium/api"
 	envoy_config_core "github.com/cilium/proxy/go/envoy/config/core/v3"
+	envoy_config_listener "github.com/cilium/proxy/go/envoy/config/listener/v3"
 	envoy_config_route "github.com/cilium/proxy/go/envoy/config/route/v3"
 	envoy_type_matcher "github.com/cilium/proxy/go/envoy/type/matcher/v3"
-	. "gopkg.in/check.v1"
 
 	"github.com/cilium/cilium/pkg/checker"
 	"github.com/cilium/cilium/pkg/identity"
@@ -67,59 +71,83 @@ var PortRuleHTTP3 = &api.PortRuleHTTP{
 	Method: "GET",
 }
 
-var googleRe2 = &envoy_type_matcher.RegexMatcher_GoogleRe2{GoogleRe2: &envoy_type_matcher.RegexMatcher_GoogleRE2{}}
-
 var ExpectedHeaders1 = []*envoy_config_route.HeaderMatcher{
 	{
 		Name: ":authority",
-		HeaderMatchSpecifier: &envoy_config_route.HeaderMatcher_SafeRegexMatch{
-			SafeRegexMatch: &envoy_type_matcher.RegexMatcher{
-				EngineType: googleRe2,
-				Regex:      "foo.cilium.io",
-			}},
+		HeaderMatchSpecifier: &envoy_config_route.HeaderMatcher_StringMatch{
+			StringMatch: &envoy_type_matcher.StringMatcher{
+				MatchPattern: &envoy_type_matcher.StringMatcher_SafeRegex{
+					SafeRegex: &envoy_type_matcher.RegexMatcher{
+						Regex: "foo.cilium.io",
+					},
+				},
+			},
+		},
 	},
 	{
 		Name: ":method",
-		HeaderMatchSpecifier: &envoy_config_route.HeaderMatcher_SafeRegexMatch{
-			SafeRegexMatch: &envoy_type_matcher.RegexMatcher{
-				EngineType: googleRe2,
-				Regex:      "GET",
-			}},
+		HeaderMatchSpecifier: &envoy_config_route.HeaderMatcher_StringMatch{
+			StringMatch: &envoy_type_matcher.StringMatcher{
+				MatchPattern: &envoy_type_matcher.StringMatcher_SafeRegex{
+					SafeRegex: &envoy_type_matcher.RegexMatcher{
+						Regex: "GET",
+					},
+				},
+			},
+		},
 	},
 	{
 		Name: ":path",
-		HeaderMatchSpecifier: &envoy_config_route.HeaderMatcher_SafeRegexMatch{
-			SafeRegexMatch: &envoy_type_matcher.RegexMatcher{
-				EngineType: googleRe2,
-				Regex:      "/foo",
-			}},
+		HeaderMatchSpecifier: &envoy_config_route.HeaderMatcher_StringMatch{
+			StringMatch: &envoy_type_matcher.StringMatcher{
+				MatchPattern: &envoy_type_matcher.StringMatcher_SafeRegex{
+					SafeRegex: &envoy_type_matcher.RegexMatcher{
+						Regex: "/foo",
+					},
+				},
+			},
+		},
 	},
 	{
 		Name:                 "header1",
 		HeaderMatchSpecifier: &envoy_config_route.HeaderMatcher_PresentMatch{PresentMatch: true},
 	},
 	{
-		Name:                 "header2",
-		HeaderMatchSpecifier: &envoy_config_route.HeaderMatcher_ExactMatch{ExactMatch: "value"},
+		Name: "header2",
+		HeaderMatchSpecifier: &envoy_config_route.HeaderMatcher_StringMatch{
+			StringMatch: &envoy_type_matcher.StringMatcher{
+				MatchPattern: &envoy_type_matcher.StringMatcher_Exact{
+					Exact: "value",
+				},
+			},
+		},
 	},
 }
 
 var ExpectedHeaders2 = []*envoy_config_route.HeaderMatcher{
 	{
 		Name: ":method",
-		HeaderMatchSpecifier: &envoy_config_route.HeaderMatcher_SafeRegexMatch{
-			SafeRegexMatch: &envoy_type_matcher.RegexMatcher{
-				EngineType: googleRe2,
-				Regex:      "PUT",
-			}},
+		HeaderMatchSpecifier: &envoy_config_route.HeaderMatcher_StringMatch{
+			StringMatch: &envoy_type_matcher.StringMatcher{
+				MatchPattern: &envoy_type_matcher.StringMatcher_SafeRegex{
+					SafeRegex: &envoy_type_matcher.RegexMatcher{
+						Regex: "PUT",
+					},
+				},
+			},
+		},
 	},
 	{
 		Name: ":path",
-		HeaderMatchSpecifier: &envoy_config_route.HeaderMatcher_SafeRegexMatch{
-			SafeRegexMatch: &envoy_type_matcher.RegexMatcher{
-				EngineType: googleRe2,
-				Regex:      "/bar",
-			}},
+		HeaderMatchSpecifier: &envoy_config_route.HeaderMatcher_StringMatch{
+			StringMatch: &envoy_type_matcher.StringMatcher{
+				MatchPattern: &envoy_type_matcher.StringMatcher_SafeRegex{
+					SafeRegex: &envoy_type_matcher.RegexMatcher{
+						Regex: "/bar",
+					},
+				},
+			},
+		},
 	},
 }
 
@@ -134,19 +162,27 @@ var ExpectedHeaderMatches2 = []*cilium.HeaderMatch{
 var ExpectedHeaders3 = []*envoy_config_route.HeaderMatcher{
 	{
 		Name: ":method",
-		HeaderMatchSpecifier: &envoy_config_route.HeaderMatcher_SafeRegexMatch{
-			SafeRegexMatch: &envoy_type_matcher.RegexMatcher{
-				EngineType: googleRe2,
-				Regex:      "GET",
-			}},
+		HeaderMatchSpecifier: &envoy_config_route.HeaderMatcher_StringMatch{
+			StringMatch: &envoy_type_matcher.StringMatcher{
+				MatchPattern: &envoy_type_matcher.StringMatcher_SafeRegex{
+					SafeRegex: &envoy_type_matcher.RegexMatcher{
+						Regex: "GET",
+					},
+				},
+			},
+		},
 	},
 	{
 		Name: ":path",
-		HeaderMatchSpecifier: &envoy_config_route.HeaderMatcher_SafeRegexMatch{
-			SafeRegexMatch: &envoy_type_matcher.RegexMatcher{
-				EngineType: googleRe2,
-				Regex:      "/bar",
-			}},
+		HeaderMatchSpecifier: &envoy_config_route.HeaderMatcher_StringMatch{
+			StringMatch: &envoy_type_matcher.StringMatcher{
+				MatchPattern: &envoy_type_matcher.StringMatcher_SafeRegex{
+					SafeRegex: &envoy_type_matcher.RegexMatcher{
+						Regex: "/bar",
+					},
+				},
+			},
+		},
 	},
 }
 
@@ -443,27 +479,27 @@ func (s *ServerSuite) TestGetPortNetworkPolicyRule(c *C) {
 
 func (s *ServerSuite) TestGetDirectionNetworkPolicy(c *C) {
 	// L4+L7
-	obtained := getDirectionNetworkPolicy(ep, L4PolicyMap1, true, nil)
+	obtained := getDirectionNetworkPolicy(ep, L4PolicyMap1, true, nil, "ingress")
 	c.Assert(obtained, checker.ExportedEquals, ExpectedPerPortPolicies12Wildcard)
 
 	// L4+L7 with header mods
-	obtained = getDirectionNetworkPolicy(ep, L4PolicyMap1HeaderMatch, true, nil)
+	obtained = getDirectionNetworkPolicy(ep, L4PolicyMap1HeaderMatch, true, nil, "ingress")
 	c.Assert(obtained, checker.ExportedEquals, ExpectedPerPortPolicies122HeaderMatchWildcard)
 
 	// L4+L7
-	obtained = getDirectionNetworkPolicy(ep, L4PolicyMap2, true, nil)
+	obtained = getDirectionNetworkPolicy(ep, L4PolicyMap2, true, nil, "ingress")
 	c.Assert(obtained, checker.ExportedEquals, ExpectedPerPortPolicies1Wildcard)
 
 	// L4-only
-	obtained = getDirectionNetworkPolicy(ep, L4PolicyMap4, true, nil)
+	obtained = getDirectionNetworkPolicy(ep, L4PolicyMap4, true, nil, "ingress")
 	c.Assert(obtained, checker.ExportedEquals, ExpectedPerPortPoliciesWildcard)
 
 	// L4-only
-	obtained = getDirectionNetworkPolicy(ep, L4PolicyMap5, true, nil)
+	obtained = getDirectionNetworkPolicy(ep, L4PolicyMap5, true, nil, "ingress")
 	c.Assert(obtained, checker.ExportedEquals, ExpectedPerPortPoliciesWildcard)
 
 	// L4-only with SNI
-	obtained = getDirectionNetworkPolicy(ep, L4PolicyMapSNI, true, nil)
+	obtained = getDirectionNetworkPolicy(ep, L4PolicyMapSNI, true, nil, "ingress")
 	c.Assert(obtained, checker.ExportedEquals, ExpectedPerPortPoliciesSNI)
 }
 
@@ -866,4 +902,152 @@ func (s *ServerSuite) TestGetNetworkPolicyTLSIngress(c *C) {
 		ConntrackMapName:       "global",
 	}
 	c.Assert(obtained, checker.ExportedEquals, expected)
+}
+
+func Test_getPublicListenerAddress(t *testing.T) {
+	type args struct {
+		port uint16
+		ipv4 bool
+		ipv6 bool
+	}
+	tests := []struct {
+		name string
+		args args
+		want *envoy_config_core.Address
+	}{
+		{
+			name: "IPv4 only",
+			args: args{
+				port: 80,
+				ipv4: true,
+				ipv6: false,
+			},
+			want: &envoy_config_core.Address{
+				Address: &envoy_config_core.Address_SocketAddress{
+					SocketAddress: &envoy_config_core.SocketAddress{
+						Protocol:      envoy_config_core.SocketAddress_TCP,
+						Address:       "0.0.0.0",
+						PortSpecifier: &envoy_config_core.SocketAddress_PortValue{PortValue: uint32(80)},
+					},
+				},
+			},
+		},
+		{
+			name: "IPv6 only",
+			args: args{
+				port: 80,
+				ipv4: false,
+				ipv6: true,
+			},
+			want: &envoy_config_core.Address{
+				Address: &envoy_config_core.Address_SocketAddress{
+					SocketAddress: &envoy_config_core.SocketAddress{
+						Protocol:      envoy_config_core.SocketAddress_TCP,
+						Address:       "::",
+						PortSpecifier: &envoy_config_core.SocketAddress_PortValue{PortValue: uint32(80)},
+					},
+				},
+			},
+		},
+		{
+			name: "IPv4 and IPv6",
+			args: args{
+				port: 80,
+				ipv4: true,
+				ipv6: true,
+			},
+			want: &envoy_config_core.Address{
+				Address: &envoy_config_core.Address_SocketAddress{
+					SocketAddress: &envoy_config_core.SocketAddress{
+						Protocol:      envoy_config_core.SocketAddress_TCP,
+						Address:       "::",
+						PortSpecifier: &envoy_config_core.SocketAddress_PortValue{PortValue: uint32(80)},
+						Ipv4Compat:    true,
+					},
+				},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := getPublicListenerAddress(tt.args.port, tt.args.ipv4, tt.args.ipv6); !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("getPublicListenerAddress() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func Test_getLocalListenerAddresses(t *testing.T) {
+	v4Local := &envoy_config_core.Address_SocketAddress{
+		SocketAddress: &envoy_config_core.SocketAddress{
+			Protocol:      envoy_config_core.SocketAddress_TCP,
+			Address:       "127.0.0.1",
+			PortSpecifier: &envoy_config_core.SocketAddress_PortValue{PortValue: uint32(80)},
+		},
+	}
+
+	v6Local := &envoy_config_core.Address_SocketAddress{
+		SocketAddress: &envoy_config_core.SocketAddress{
+			Protocol:      envoy_config_core.SocketAddress_TCP,
+			Address:       "::1",
+			PortSpecifier: &envoy_config_core.SocketAddress_PortValue{PortValue: uint32(80)},
+		},
+	}
+	type args struct {
+		port uint16
+		ipv4 bool
+		ipv6 bool
+	}
+	tests := []struct {
+		name           string
+		args           args
+		want           *envoy_config_core.Address
+		wantAdditional []*envoy_config_listener.AdditionalAddress
+	}{
+		{
+			name: "IPv4 only",
+			args: args{
+				port: 80,
+				ipv4: true,
+				ipv6: false,
+			},
+			want: &envoy_config_core.Address{
+				Address: v4Local,
+			},
+		},
+		{
+			name: "IPv6 only",
+			args: args{
+				port: 80,
+				ipv4: false,
+				ipv6: true,
+			},
+			want: &envoy_config_core.Address{
+				Address: v6Local,
+			},
+		},
+		{
+			name: "IPv4 and IPv6",
+			args: args{
+				port: 80,
+				ipv4: true,
+				ipv6: true,
+			},
+			want: &envoy_config_core.Address{
+				Address: v4Local,
+			},
+			wantAdditional: []*envoy_config_listener.AdditionalAddress{{Address: &envoy_config_core.Address{Address: v6Local}}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, gotAdditional := getLocalListenerAddresses(tt.args.port, tt.args.ipv4, tt.args.ipv6)
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("getLocalListenerAddresses() got = %v, want %v", got, tt.want)
+			}
+			if !reflect.DeepEqual(gotAdditional, tt.wantAdditional) {
+				t.Errorf("getLocalListenerAddresses() got1 = %v, want %v", gotAdditional, tt.wantAdditional)
+			}
+		})
+	}
 }

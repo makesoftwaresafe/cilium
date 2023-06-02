@@ -46,7 +46,8 @@
 #define CONDITIONAL_PREALLOC BPF_F_NO_PREALLOC
 #endif
 
-#if defined(ENCAP_IFINDEX) || defined(ENABLE_EGRESS_GATEWAY)
+#if defined(ENCAP_IFINDEX) || defined(ENABLE_EGRESS_GATEWAY) || \
+    (defined(ENABLE_DSR) && DSR_ENCAP_MODE == DSR_ENCAP_GENEVE)
 #define HAVE_ENCAP
 
 /* NOT_VTEP_DST is passed to an encapsulation function when the
@@ -55,17 +56,10 @@
 #define NOT_VTEP_DST 0
 #endif
 
-/* TODO: ipsec v6 tunnel datapath still needs separate fixing */
-#ifndef ENABLE_IPSEC
-# ifdef ENABLE_IPV6
-#  define ENABLE_ENCAP_HOST_REMAP 1
-# endif
-#endif
-
 /* XFER_FLAGS that get transferred from XDP to SKB */
 enum {
 	XFER_PKT_NO_SVC		= (1 << 0),  /* Skip upper service handling. */
-	XFER_PKT_ENCAP		= (1 << 1),  /* needs encap, tunnel info is in metadata. */
+	XFER_UNUSED		= (1 << 1),
 	XFER_PKT_SNAT_DONE	= (1 << 2),  /* SNAT is done */
 };
 
@@ -75,17 +69,20 @@ enum {
 	XFER_ENCAP_NODEID = 1,
 	XFER_ENCAP_SECLABEL = 2,
 	XFER_ENCAP_DSTID = 3,
+	XFER_ENCAP_PORT = 4,
+	XFER_ENCAP_ADDR = 5,
 };
 
 /* FIB errors from BPF neighbor map. */
 #define BPF_FIB_MAP_NO_NEIGH	100
 
-/* These are shared with test/bpf/check-complexity.sh, when modifying any of
- * the below, that script should also be updated.
- */
 #define CILIUM_CALL_DROP_NOTIFY			1
 #define CILIUM_CALL_ERROR_NOTIFY		2
-#define CILIUM_CALL_SEND_ICMP6_ECHO_REPLY	3
+/*
+ * A gap in the macro numbering sequence was created by #24921.
+ * It can be reused for a new macro in the future, but caution is needed when
+ * backporting changes as it may conflict with older versions of the code.
+ */
 #define CILIUM_CALL_HANDLE_ICMP6_NS		4
 #define CILIUM_CALL_SEND_ICMP6_TIME_EXCEEDED	5
 #define CILIUM_CALL_ARP				6
@@ -128,7 +125,14 @@ enum {
 #define CILIUM_CALL_IPV6_NODEPORT_NAT_INGRESS	37
 #define CILIUM_CALL_IPV4_NODEPORT_SNAT_FWD	38
 #define CILIUM_CALL_IPV6_NODEPORT_SNAT_FWD	39
-#define CILIUM_CALL_SIZE			40
+#define CILIUM_CALL_IPV4_NODEPORT_DSR_INGRESS	40
+#define CILIUM_CALL_IPV6_NODEPORT_DSR_INGRESS	41
+#define CILIUM_CALL_IPV4_INTER_CLUSTER_REVSNAT	42
+#define CILIUM_CALL_IPV4_CONT_FROM_HOST		43
+#define CILIUM_CALL_IPV4_CONT_FROM_NETDEV	44
+#define CILIUM_CALL_IPV6_CONT_FROM_HOST		45
+#define CILIUM_CALL_IPV6_CONT_FROM_NETDEV	46
+#define CILIUM_CALL_SIZE			47
 
 typedef __u64 mac_t;
 
@@ -212,13 +216,6 @@ __revalidate_data_pull(struct __ctx_buff *ctx, void **data, void **data_end,
 #define revalidate_data_pull(ctx, data, data_end, ip)			\
 	__revalidate_data_pull(ctx, data, data_end, (void **)ip, sizeof(**ip), true)
 
-/* revalidate_data_maybe_pull() does the same as revalidate_data_pull()
- * except that the skb data pull is controlled by the "pull" argument.
- */
-#define revalidate_data_maybe_pull(ctx, data, data_end, ip, pull)	\
-	__revalidate_data_pull(ctx, data, data_end, (void **)ip, sizeof(**ip), pull)
-
-
 /* revalidate_data() initializes the provided pointers from the ctx.
  * Returns true if 'ctx' is long enough for an IP header of the provided type,
  * false otherwise.
@@ -228,13 +225,11 @@ __revalidate_data_pull(struct __ctx_buff *ctx, void **data, void **data_end,
 
 /* Macros for working with L3 cilium defined IPV6 addresses */
 #define BPF_V6(dst, ...)	BPF_V6_1(dst, fetch_ipv6(__VA_ARGS__))
-#define BPF_V6_1(dst, ...)	BPF_V6_4(dst, __VA_ARGS__)
-#define BPF_V6_4(dst, a1, a2, a3, a4)		\
+#define BPF_V6_1(dst, ...)	BPF_V6_2(dst, __VA_ARGS__)
+#define BPF_V6_2(dst, a1, a2)		\
 	({					\
-		dst.p1 = a1;			\
-		dst.p2 = a2;			\
-		dst.p3 = a3;			\
-		dst.p4 = a4;			\
+		dst.d1 = a1;			\
+		dst.d2 = a2;			\
 	})
 
 #define ENDPOINT_KEY_IPV4 1
@@ -295,11 +290,12 @@ struct tunnel_value {
 struct endpoint_info {
 	__u32		ifindex;
 	__u16		unused; /* used to be sec_label, no longer used */
-	__u16           lxc_id;
+	__u16		lxc_id;
 	__u32		flags;
 	mac_t		mac;
 	mac_t		node_mac;
-	__u32		pad[4];
+	__u32		sec_id;
+	__u32		pad[3];
 };
 
 struct edt_id {
@@ -314,29 +310,75 @@ struct edt_info {
 };
 
 struct remote_endpoint_info {
-	__u32		sec_label;
+	__u32		sec_identity;
 	__u32		tunnel_endpoint;
 	__u16		node_id;
 	__u8		key;
 };
 
+/*
+ * Longest-prefix match map lookup only matches the number of bits from the
+ * beginning of the key stored in the map indicated by the 'lpm_key' field in
+ * the same stored map key, not including the 'lpm_key' field itself. Note that
+ * the 'lpm_key' value passed in the lookup function argument needs to be a
+ * "full prefix" (POLICY_FULL_PREFIX defined below).
+ *
+ * Since we need to be able to wildcard 'sec_label' independently on 'protocol'
+ * and 'dport' fields, we'll need to do that explicitly with a separate lookup
+ * where 'sec_label' is zero. For the 'protocol' and 'port' we can use the
+ * longest-prefix match by placing them at the end ot the key in this specific
+ * order, as we want to be able to wildcard those fields in a specific pattern:
+ * 'protocol' can only be wildcarded if dport is also fully wildcarded.
+ * 'protocol' is never partially wildcarded, so it is either fully wildcarded or
+ * not wildcarded at all. 'dport' can be partially wildcarded, but only when
+ * 'protocol' is fully specified. This follows the logic that the destination
+ * port is a property of a transport protocol and can not be specified without
+ * also specifying the protocol.
+ */
 struct policy_key {
+	struct bpf_lpm_trie_key lpm_key;
 	__u32		sec_label;
-	__u16		dport;
-	__u8		protocol;
 	__u8		egress:1,
 			pad:7;
+	__u8		protocol; /* can be wildcarded if 'dport' is fully wildcarded */
+	__u16		dport; /* can be wildcarded with CIDR-like prefix */
 };
+
+/* POLICY_FULL_PREFIX gets full prefix length of policy_key */
+#define POLICY_FULL_PREFIX						\
+  (8 * (sizeof(struct policy_key) - sizeof(struct bpf_lpm_trie_key)))
 
 struct policy_entry {
 	__be16		proxy_port;
 	__u8		deny:1,
-			pad:7;
+			wildcard_protocol:1, /* protocol is fully wildcarded */
+			wildcard_dport:1, /* dport is fully wildcarded */
+			pad:5;
 	__u8		auth_type;
 	__u16		pad1;
 	__u16		pad2;
 	__u64		packets;
 	__u64		bytes;
+};
+
+struct auth_key {
+	__u32       local_sec_label;
+	__u32       remote_sec_label;
+	__u16       remote_node_id; /* zero for local node */
+	__u8        auth_type;
+	__u8        pad;
+};
+
+/* expiration is Unix epoch time in unit nanosecond/2^9 (ns/512). */
+struct auth_info {
+	__u64       expiration;
+};
+
+/*
+ * Runtime configuration items for the datapath.
+ */
+enum {
+	RUNTIME_CONFIG_UTIME_OFFSET = 0, /* Index to Unix time offset in 512 ns units */
 };
 
 struct metrics_key {
@@ -543,6 +585,11 @@ enum {
 #define DROP_NAT46		-187
 #define DROP_NAT64		-188
 #define DROP_POLICY_AUTH_REQUIRED	-189
+#define DROP_CT_NO_MAP_FOUND	-190
+#define DROP_SNAT_NO_MAP_FOUND	-191
+#define DROP_INVALID_CLUSTER_ID	-192
+#define DROP_DSR_ENCAP_UNSUPP_PROTO	-193
+#define DROP_NO_EGRESS_GATEWAY	-194
 
 #define NAT_PUNT_TO_STACK	DROP_NAT_NOT_NEEDED
 #define NAT_46X64_RECIRC	100
@@ -626,6 +673,10 @@ enum metric_dir {
  */
 #define MARK_MAGIC_HEALTH		MARK_MAGIC_DECRYPT
 
+/* Shouldn't interfere with MARK_MAGIC_TO_PROXY. Lower 8bits carries cluster_id */
+#define MARK_MAGIC_CLUSTER_ID		MARK_MAGIC_TO_PROXY
+#define MARK_MAGIC_CLUSTER_ID_MASK	0x00FF
+
 /* IPv4 option used to carry service addr and port for DSR.
  *
  * Copy = 1 (option is copied to each fragment)
@@ -649,6 +700,27 @@ enum metric_dir {
 #define DSR_IPV6_OPT_TYPE	0x1B
 #define DSR_IPV6_OPT_LEN	(sizeof(struct dsr_opt_v6) - 4)
 #define DSR_IPV6_EXT_LEN	((sizeof(struct dsr_opt_v6) - 8) / 8)
+
+/* The high-order bit of the Geneve option type indicates that
+ * this is a critical option.
+ *
+ * https://www.rfc-editor.org/rfc/rfc8926.html#name-tunnel-options
+ */
+#define GENEVE_OPT_TYPE_CRIT	0x80
+
+/* Geneve option used to carry service addr and port for DSR.
+ *
+ * Class = 0x014B (Cilium according to [1])
+ * Type  = 0x1   (vendor-specific)
+ *
+ * [1]: https://www.iana.org/assignments/nvo3/nvo3.xhtml#geneve-option-class
+ */
+#define DSR_GENEVE_OPT_CLASS	0x014B
+#define DSR_GENEVE_OPT_TYPE	(GENEVE_OPT_TYPE_CRIT | 0x01)
+#define DSR_IPV4_GENEVE_OPT_LEN	\
+	((sizeof(struct geneve_dsr_opt4) - sizeof(struct geneve_opt_hdr)) / 4)
+#define DSR_IPV6_GENEVE_OPT_LEN	\
+	((sizeof(struct geneve_dsr_opt6) - sizeof(struct geneve_opt_hdr)) / 4)
 
 /* We cap key index at 4 bits because mark value is used to map ctx to key */
 #define MAX_KEY_INDEX 15
@@ -696,19 +768,19 @@ enum {
 #define	CB_ENCRYPT_MAGIC	CB_SRC_LABEL	/* Alias, non-overlapping */
 #define	CB_DST_ENDPOINT_ID	CB_SRC_LABEL    /* Alias, non-overlapping */
 #define CB_SRV6_SID_1		CB_SRC_LABEL	/* Alias, non-overlapping */
-#define CB_ENCAP_NODEID		CB_SRC_LABEL	/* XDP */
 	CB_IFINDEX,
 #define	CB_NAT_46X64		CB_IFINDEX	/* Alias, non-overlapping */
 #define	CB_ADDR_V4		CB_IFINDEX	/* Alias, non-overlapping */
 #define	CB_ADDR_V6_1		CB_IFINDEX	/* Alias, non-overlapping */
 #define	CB_IPCACHE_SRC_LABEL	CB_IFINDEX	/* Alias, non-overlapping */
 #define CB_SRV6_SID_2		CB_IFINDEX	/* Alias, non-overlapping */
-#define CB_ENCAP_SECLABEL	CB_IFINDEX	/* XDP */
+#define CB_CLUSTER_ID_EGRESS	CB_IFINDEX	/* Alias, non-overlapping */
+#define CB_HSIPC_ADDR_V4	CB_IFINDEX	/* Alias, non-overlapping */
 	CB_POLICY,
 #define	CB_ADDR_V6_2		CB_POLICY	/* Alias, non-overlapping */
-#define	CB_BACKEND_ID		CB_POLICY	/* Alias, non-overlapping */
 #define CB_SRV6_SID_3		CB_POLICY	/* Alias, non-overlapping */
-#define CB_ENCAP_DSTID		CB_POLICY	/* XDP */
+#define	CB_CLUSTER_ID_INGRESS	CB_POLICY	/* Alias, non-overlapping */
+#define CB_HSIPC_PORT		CB_POLICY	/* Alias, non-overlapping */
 	CB_NAT,
 #define	CB_ADDR_V6_3		CB_NAT		/* Alias, non-overlapping */
 #define	CB_FROM_HOST		CB_NAT		/* Alias, non-overlapping */
@@ -720,6 +792,7 @@ enum {
 						 */
 #define	CB_CUSTOM_CALLS		CB_CT_STATE	/* Alias, non-overlapping */
 #define	CB_SRV6_VRF_ID		CB_CT_STATE	/* Alias, non-overlapping */
+#define	CB_FROM_TUNNEL		CB_CT_STATE	/* Alias, non-overlapping */
 };
 
 /* Magic values for CB_FROM_HOST.
@@ -835,8 +908,9 @@ struct ct_entry {
 	      proxy_redirect:1, /* Connection is redirected to a proxy */
 	      dsr:1,
 	      from_l7lb:1, /* Connection is originated from an L7 LB proxy */
-	      auth_required:1,
-	      reserved:6;
+	      reserved1:1, /* Was auth_required, not used in production anywhere */
+	      from_tunnel:1, /* Connection is over tunnel */
+	      reserved:5;
 	__u16 rev_nat_index;
 	/* In the kernel ifindex is u32, so we need to check in cilium-agent
 	 * that ifindex of a NodePort device is <= MAX(u16).
@@ -1017,16 +1091,23 @@ struct lb_affinity_match {
 
 struct ct_state {
 	__u16 rev_nat_index;
+#ifndef DISABLE_LOOPBACK_LB
 	__u16 loopback:1,
+#else
+	__u16 loopback_disabled:1,
+#endif
 	      node_port:1,
 	      dsr:1,
 	      syn:1,
 	      proxy_redirect:1,	/* Connection is redirected to a proxy */
 	      from_l7lb:1,	/* Connection is originated from an L7 LB proxy */
-	      auth_required:1,
-	      reserved:9;
+	      reserved1:1,	/* Was auth_required, not used in production anywhere */
+	      from_tunnel:1,	/* Connection is from tunnel */
+	      reserved:8;
+#ifndef DISABLE_LOOPBACK_LB
 	__be32 addr;
 	__be32 svc_addr;
+#endif
 	__u32 src_sec_id;
 	__u16 ifindex;
 	__u32 backend_id;	/* Backend ID in lb4_backends */
@@ -1080,6 +1161,15 @@ static __always_inline int redirect_ep(struct __ctx_buff *ctx __maybe_unused,
 	}
 }
 
+static __always_inline __u64 ctx_adjust_hroom_flags(void)
+{
+#ifdef HAVE_CSUM_LEVEL
+	return BPF_F_ADJ_ROOM_NO_CSUM_RESET;
+#else
+	return 0;
+#endif
+}
+
 struct lpm_v4_key {
 	struct bpf_lpm_trie_key lpm;
 	__u8 addr[4];
@@ -1094,6 +1184,61 @@ struct lpm_val {
 	/* Just dummy for now. */
 	__u8 flags;
 };
+
+struct geneve_opt_hdr {
+	__be16 opt_class;
+	__u8 type;
+#ifdef __LITTLE_ENDIAN_BITFIELD
+	__u8 length:5,
+	     rsvd:3;
+#else
+	__u8 rsvd:3,
+	     length:5;
+#endif
+};
+
+struct geneve_dsr_opt4 {
+	struct geneve_opt_hdr hdr;
+	__be32	addr;
+	__be16	port;
+	__u16	pad;
+};
+
+struct geneve_dsr_opt6 {
+	struct geneve_opt_hdr hdr;
+	union v6addr addr;
+	__be16	port;
+	__u16	pad;
+};
+
+struct genevehdr {
+#ifdef __LITTLE_ENDIAN_BITFIELD
+	__u8 opt_len:6,
+	     ver:2;
+	__u8 rsvd:6,
+	     critical:1,
+	     control:1;
+#else
+	__u8 ver:2,
+	     opt_len:6;
+	__u8 control:1,
+	     critical:1,
+	     rsvd:6;
+#endif
+	__be16 protocol_type;
+	__u8 vni[3];
+	__u8 reserved;
+};
+
+struct vxlanhdr {
+	__be32 vx_flags;
+	__be32 vx_vni;
+};
+
+/* Older kernels don't support the larger tunnel key structure and we don't
+ * need it since we only want to retrieve the tunnel ID anyway.
+ */
+#define TUNNEL_KEY_WITHOUT_SRC_IP offsetof(struct bpf_tunnel_key, local_ipv4)
 
 #include "overloadable.h"
 

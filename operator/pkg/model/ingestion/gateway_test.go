@@ -9,15 +9,11 @@ import (
 	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	gatewayv1alpha2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
 	gatewayv1beta1 "sigs.k8s.io/gateway-api/apis/v1beta1"
 
 	"github.com/cilium/cilium/operator/pkg/model"
 )
-
-type gwTestCase struct {
-	input Input
-	want  []model.HTTPListener
-}
 
 var basicHTTP = Input{
 	GatewayClass: gatewayv1beta1.GatewayClass{},
@@ -120,6 +116,146 @@ var basicHTTPListeners = []model.HTTPListener{
 			},
 		},
 	},
+}
+
+var basicTLS = Input{
+	GatewayClass: gatewayv1beta1.GatewayClass{},
+	Gateway: gatewayv1beta1.Gateway{
+		TypeMeta: metav1.TypeMeta{
+			Kind:       "Gateway",
+			APIVersion: "gateway.networking.k8s.io/v1beta1",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "my-gateway",
+			Namespace: "default",
+		},
+		Spec: gatewayv1beta1.GatewaySpec{
+			Listeners: []gatewayv1beta1.Listener{
+				{
+					Name:     "prod-web-gw",
+					Port:     443,
+					Protocol: "TLS",
+				},
+			},
+		},
+	},
+	TLSRoutes: []gatewayv1alpha2.TLSRoute{
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "tls-app-1",
+				Namespace: "default",
+			},
+			Spec: gatewayv1alpha2.TLSRouteSpec{
+				CommonRouteSpec: gatewayv1beta1.CommonRouteSpec{
+					ParentRefs: []gatewayv1beta1.ParentReference{
+						{
+							Name: "my-gateway",
+						},
+					},
+				},
+				Hostnames: []gatewayv1alpha2.Hostname{
+					"example.com",
+				},
+				Rules: []gatewayv1alpha2.TLSRouteRule{
+					{
+						BackendRefs: []gatewayv1beta1.BackendRef{
+							{
+								BackendObjectReference: gatewayv1alpha2.BackendObjectReference{
+									Name: "my-service",
+									Port: model.AddressOf[gatewayv1beta1.PortNumber](443),
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	},
+	Services: []corev1.Service{
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "my-service",
+				Namespace: "default",
+			},
+		},
+	},
+}
+
+var simpleSameNamespaceTLSListeners = []model.TLSListener{
+	{
+		Name: "https",
+		Sources: []model.FullyQualifiedResource{
+			{
+				Name:      "gateway-tlsroute",
+				Namespace: "gateway-conformance-infra",
+				Group:     "gateway.networking.k8s.io",
+				Version:   "v1beta1",
+				Kind:      "Gateway",
+			},
+		},
+		Address:  "",
+		Port:     443,
+		Hostname: "*",
+		Routes: []model.TLSRoute{
+			{
+				Hostnames: []string{
+					"abc.example.com",
+				},
+				Backends: []model.Backend{
+					{
+						Name:      "tls-backend",
+						Namespace: "gateway-conformance-infra",
+						Port: &model.BackendPort{
+							Port: 443,
+						},
+					},
+				},
+			},
+		},
+	},
+}
+
+var basicTLSListeners = []model.TLSListener{
+	{
+		Name: "prod-web-gw",
+		Sources: []model.FullyQualifiedResource{
+			{
+				Name:      "my-gateway",
+				Namespace: "default",
+				Group:     "gateway.networking.k8s.io",
+				Version:   "v1beta1",
+				Kind:      "Gateway",
+			},
+		},
+		Address:  "",
+		Port:     443,
+		Hostname: "*",
+		Routes: []model.TLSRoute{
+			{
+				Hostnames: []string{
+					"example.com",
+				},
+				Backends: []model.Backend{
+					{
+						Name:      "my-service",
+						Namespace: "default",
+						Port: &model.BackendPort{
+							Port: 443,
+						},
+					},
+				},
+			},
+		},
+	},
+}
+
+var simpleSameNamespaceTLS = Input{
+	GatewayClass: gatewayv1beta1.GatewayClass{},
+	Gateway:      sameNamespaceTLSGateway,
+	TLSRoutes: []gatewayv1alpha2.TLSRoute{
+		sameNamespaceTLSRoute,
+	},
+	Services: allServices,
 }
 
 var crossNamespaceHTTPInput = Input{
@@ -284,11 +420,7 @@ var headerMatchingHTTPListeners = []model.HTTPListener{
 				HeadersMatch: []model.KeyValueMatch{
 					{
 						Key:   "color",
-						Match: model.StringMatch{Exact: "blue"},
-					},
-					{
-						Key:   "color",
-						Match: model.StringMatch{Exact: "green"},
+						Match: model.StringMatch{Prefix: "", Exact: "blue", Regex: ""},
 					},
 				},
 				Backends: []model.Backend{
@@ -303,14 +435,49 @@ var headerMatchingHTTPListeners = []model.HTTPListener{
 			},
 			{
 				HeadersMatch: []model.KeyValueMatch{
-					{Key: "color", Match: model.StringMatch{Exact: "red"}},
-					{Key: "color", Match: model.StringMatch{Exact: "yellow"}},
+					{
+						Key:   "color",
+						Match: model.StringMatch{Exact: "blue"},
+					},
+				},
+				Backends: []model.Backend{
+					{
+						Name:      "infra-backend-v1",
+						Namespace: "gateway-conformance-infra",
+						Port: &model.BackendPort{
+							Port: 8080,
+						},
+					},
+				},
+			},
+			{
+				HeadersMatch: []model.KeyValueMatch{
+					{
+						Key:   "color",
+						Match: model.StringMatch{Exact: "red"},
+					},
 				},
 				Backends: []model.Backend{
 					{
 						Name:      "infra-backend-v2",
 						Namespace: "gateway-conformance-infra",
 						Port: &model.BackendPort{
+							Port: 8080,
+						},
+					},
+				},
+			},
+			{
+				HeadersMatch: []model.KeyValueMatch{
+					{
+						Key:   "color",
+						Match: model.StringMatch{Exact: "yellow"},
+					},
+				},
+				Backends: []model.Backend{
+					{
+						Name:      "infra-backend-v2",
+						Namespace: "gateway-conformance-infra", Port: &model.BackendPort{
 							Port: 8080,
 						},
 					},
@@ -876,54 +1043,402 @@ var requestHeaderModifierHTTPListeners = []model.HTTPListener{
 	},
 }
 
-func TestGatewayAPI(t *testing.T) {
+var simpleSameNamespaceHTTPInput = Input{
+	GatewayClass: gatewayv1beta1.GatewayClass{},
+	Gateway:      sameNamespaceGateway,
+	HTTPRoutes:   simpleSameNamespaceHTTPRoutes,
+	Services:     allServices,
+}
 
-	tests := map[string]gwTestCase{
+var simpleSameNamespaceHTTPListeners = []model.HTTPListener{
+	{
+		Name: "http",
+		Sources: []model.FullyQualifiedResource{
+			{
+				Name:      "same-namespace",
+				Namespace: "gateway-conformance-infra",
+			},
+		},
+		Port:     80,
+		Hostname: "*",
+		Routes: []model.HTTPRoute{
+			{
+				Backends: []model.Backend{
+					{
+						Name:      "infra-backend-v1",
+						Namespace: "gateway-conformance-infra",
+						Port: &model.BackendPort{
+							Port: 8080,
+						},
+					},
+				},
+			},
+		},
+	},
+}
+
+var methodMatchingHTTPInput = Input{
+	GatewayClass: gatewayv1beta1.GatewayClass{},
+	Gateway:      sameNamespaceGateway,
+	HTTPRoutes:   methodMatchingHTTPRoutes,
+	Services:     allServices,
+}
+
+var methodMatchingHTTPListeners = []model.HTTPListener{
+	{
+		Name: "http",
+		Sources: []model.FullyQualifiedResource{
+			{
+				Name:      "same-namespace",
+				Namespace: "gateway-conformance-infra",
+			},
+		},
+		Port:     80,
+		Hostname: "*",
+		Routes: []model.HTTPRoute{
+			{
+				Method: model.AddressOf("POST"),
+				Backends: []model.Backend{
+					{
+						Name:      "infra-backend-v1",
+						Namespace: "gateway-conformance-infra",
+						Port: &model.BackendPort{
+							Port: 8080,
+						},
+					},
+				},
+			},
+			{
+				Method: model.AddressOf("GET"),
+				Backends: []model.Backend{
+					{
+						Name:      "infra-backend-v2",
+						Namespace: "gateway-conformance-infra",
+						Port: &model.BackendPort{
+							Port: 8080,
+						},
+					},
+				},
+			},
+		},
+	},
+}
+
+var requestRedirectHTTPInput = Input{
+	GatewayClass: gatewayv1beta1.GatewayClass{},
+	Gateway:      sameNamespaceGateway,
+	HTTPRoutes:   requestRedirectHTTPRoutes,
+	Services:     allServices,
+}
+var requestRedirectHTTPListeners = []model.HTTPListener{
+	{
+		Name: "http",
+		Sources: []model.FullyQualifiedResource{
+			{
+				Name:      "same-namespace",
+				Namespace: "gateway-conformance-infra",
+			},
+		},
+		Port:     80,
+		Hostname: "*",
+		Routes: []model.HTTPRoute{
+			{
+				PathMatch: model.StringMatch{Prefix: "/hostname-redirect"},
+				Backends: []model.Backend{
+					{
+						Name:      "infra-backend-v1",
+						Namespace: "gateway-conformance-infra",
+						Port: &model.BackendPort{
+							Port: 8080,
+						},
+					},
+				},
+				RequestRedirect: &model.HTTPRequestRedirectFilter{
+					Hostname: model.AddressOf("example.com"),
+				},
+			},
+			{
+				PathMatch: model.StringMatch{Prefix: "/status-code-301"},
+				Backends:  []model.Backend{},
+				DirectResponse: &model.DirectResponse{
+					StatusCode: 500,
+				},
+				RequestRedirect: &model.HTTPRequestRedirectFilter{
+					StatusCode: model.AddressOf(301),
+				},
+			},
+			{
+				PathMatch: model.StringMatch{Prefix: "/host-and-status"},
+				Backends: []model.Backend{
+					{
+						Name:      "infra-backend-v1",
+						Namespace: "gateway-conformance-infra",
+						Port: &model.BackendPort{
+							Port: 8080,
+						},
+					},
+				},
+				RequestRedirect: &model.HTTPRequestRedirectFilter{
+					Hostname:   model.AddressOf("example.com"),
+					StatusCode: model.AddressOf(301),
+				},
+			},
+		},
+	},
+}
+
+var responseHeaderModifierHTTPInput = Input{
+	GatewayClass: gatewayv1beta1.GatewayClass{},
+	Gateway:      sameNamespaceGateway,
+	HTTPRoutes:   responseHeaderModifierHTTPRoutes,
+	Services:     allServices,
+}
+var responseHeaderModifierHTTPListeners = []model.HTTPListener{
+	{
+		Name: "http",
+		Sources: []model.FullyQualifiedResource{
+			{
+				Name:      "same-namespace",
+				Namespace: "gateway-conformance-infra",
+			},
+		},
+		Port: 80, Hostname: "*",
+		Routes: []model.HTTPRoute{
+			{
+				PathMatch: model.StringMatch{Prefix: "/set"},
+				Backends: []model.Backend{
+					{
+						Name:      "infra-backend-v1",
+						Namespace: "gateway-conformance-infra",
+						Port: &model.BackendPort{
+							Port: 8080,
+						},
+					},
+				},
+				ResponseHeaderModifier: &model.HTTPHeaderFilter{
+					HeadersToSet: []model.Header{
+						{
+							Name:  "X-Header-Set",
+							Value: "set-overwrites-values",
+						},
+					},
+				},
+			},
+			{
+				PathMatch: model.StringMatch{Prefix: "/add"},
+				Backends: []model.Backend{
+					{
+						Name:      "infra-backend-v1",
+						Namespace: "gateway-conformance-infra",
+						Port: &model.BackendPort{
+							Port: 8080,
+						},
+					},
+				},
+				ResponseHeaderModifier: &model.HTTPHeaderFilter{
+					HeadersToAdd: []model.Header{
+						{
+							Name:  "X-Header-Add",
+							Value: "add-appends-values",
+						},
+					},
+				},
+			},
+			{
+				PathMatch: model.StringMatch{Prefix: "/remove"},
+				Backends: []model.Backend{
+					{
+						Name:      "infra-backend-v1",
+						Namespace: "gateway-conformance-infra",
+						Port: &model.BackendPort{
+							Port: 8080,
+						},
+					},
+				},
+				ResponseHeaderModifier: &model.HTTPHeaderFilter{
+					HeadersToRemove: []string{"X-Header-Remove"},
+				},
+			},
+			{
+				PathMatch: model.StringMatch{Prefix: "/multiple"},
+				Backends: []model.Backend{
+					{
+						Name:      "infra-backend-v1",
+						Namespace: "gateway-conformance-infra",
+						Port: &model.BackendPort{
+							Port: 8080,
+						},
+					},
+				},
+				ResponseHeaderModifier: &model.HTTPHeaderFilter{
+					HeadersToAdd: []model.Header{
+						{
+							Name:  "X-Header-Add-1",
+							Value: "header-add-1",
+						},
+						{
+							Name:  "X-Header-Add-2",
+							Value: "header-add-2",
+						},
+						{
+							Name:  "X-Header-Add-3",
+							Value: "header-add-3",
+						},
+					},
+					HeadersToSet: []model.Header{
+						{
+							Name:  "X-Header-Set-1",
+							Value: "header-set-1",
+						},
+						{
+							Name:  "X-Header-Set-2",
+							Value: "header-set-2",
+						},
+					},
+					HeadersToRemove: []string{
+						"X-Header-Remove-1",
+						"X-Header-Remove-2",
+					},
+				},
+			},
+			{
+				PathMatch: model.StringMatch{Prefix: "/case-insensitivity"},
+				Backends: []model.Backend{
+					{
+						Name:      "infra-backend-v1",
+						Namespace: "gateway-conformance-infra",
+						Port: &model.BackendPort{
+							Port: 8080,
+						},
+					},
+				},
+				ResponseHeaderModifier: &model.HTTPHeaderFilter{
+					HeadersToAdd: []model.Header{
+						{
+							Name:  "X-Header-Add",
+							Value: "header-add",
+						},
+						{
+							Name:  "x-lowercase-add",
+							Value: "lowercase-add",
+						},
+						{
+							Name:  "x-Mixedcase-ADD-1",
+							Value: "mixedcase-add-1",
+						},
+						{
+							Name:  "X-mixeDcase-add-2",
+							Value: "mixedcase-add-2",
+						},
+						{
+							Name:  "X-UPPERCASE-ADD",
+							Value: "uppercase-add",
+						},
+					},
+					HeadersToSet: []model.Header{
+						{
+							Name:  "X-Header-Set",
+							Value: "header-set",
+						},
+					},
+					HeadersToRemove: []string{
+						"X-Header-Remove",
+					},
+				},
+			},
+		},
+	},
+}
+
+func TestHTTPGatewayAPI(t *testing.T) {
+	tests := map[string]struct {
+		input Input
+		want  []model.HTTPListener
+	}{
 		"basic http": {
 			input: basicHTTP,
 			want:  basicHTTPListeners,
 		},
-		"cross namespace": {
+		"Conformance/HTTPRouteSimpleSameNamespace": {
+			input: simpleSameNamespaceHTTPInput,
+			want:  simpleSameNamespaceHTTPListeners,
+		},
+		"Conformance/HTTPRouteCrossNamespace": {
 			input: crossNamespaceHTTPInput,
 			want:  crossNamespaceHTTPListeners,
 		},
-		"exact path matching": {
+		"Conformance/HTTPExactPathMatching": {
 			input: exactPathMatchingHTTPInput,
 			want:  exactPathMatchingHTTPListeners,
 		},
-		"header matching": {
+		"Conformance/HTTPRouteHeaderMatching": {
 			input: headerMatchingHTTPInput,
 			want:  headerMatchingHTTPListeners,
 		},
-		"hostname intersection": {
+		"Conformance/HTTPRouteHostnameIntersection": {
 			input: hostnameIntersectionHTTPInput,
 			want:  hostnameIntersectionHTTPListeners,
 		},
-		"listener hostname matching": {
+		"Conformance/HTTPRouteListenerHostnameMatching": {
 			input: listenerHostnameMatchingHTTPInput,
 			want:  listenerHostnameMatchingHTTPListeners,
 		},
-		"matching across": {
+		"Conformance/HTTPRouteMatchingAcrossRoutes": {
 			input: matchingAcrossHTTPInput,
 			want:  matchingAcrossHTTPListeners,
 		},
-		"matching": {
+		"Conformance/HTTPRouteMatching": {
 			input: matchingHTTPInput,
 			want:  matchingHTTPListeners,
 		},
-		"query param matching": {
+		"Conformance/HTTPRouteMethodMatching": {
+			input: methodMatchingHTTPInput,
+			want:  methodMatchingHTTPListeners,
+		},
+		"Conformance/HTTPRouteQueryParamMatching": {
 			input: queryParamMatchingHTTPInput,
 			want:  queryParamMatchingHTTPListeners,
 		},
-		"request header modifier": {
+		"Conformance/HTTPRouteRequestHeaderModifier": {
 			input: requestHeaderModifierHTTPInput,
 			want:  requestHeaderModifierHTTPListeners,
+		},
+		"Conformance/HTTPRouteRequestRedirect": {
+			input: requestRedirectHTTPInput,
+			want:  requestRedirectHTTPListeners,
+		},
+		"Conformance/HTTPRouteResponseHeaderModifier": {
+			input: responseHeaderModifierHTTPInput,
+			want:  responseHeaderModifierHTTPListeners,
 		},
 	}
 
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
-			listeners := GatewayAPI(tc.input)
+			listeners, _ := GatewayAPI(tc.input)
+			assert.Equal(t, tc.want, listeners, "Listeners did not match")
+		})
+	}
+}
+
+func TestTLSGatewayAPI(t *testing.T) {
+	tests := map[string]struct {
+		input Input
+		want  []model.TLSListener
+	}{
+		"basic http": {
+			input: basicTLS,
+			want:  basicTLSListeners,
+		},
+		"Conformance/TLSRouteSimpleSameNamespace": {
+			input: simpleSameNamespaceTLS,
+			want:  simpleSameNamespaceTLSListeners,
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			_, listeners := GatewayAPI(tc.input)
 			assert.Equal(t, tc.want, listeners, "Listeners did not match")
 		})
 	}

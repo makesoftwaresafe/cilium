@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
+	. "github.com/cilium/checkmate"
 	"golang.org/x/net/context"
-	. "gopkg.in/check.v1"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 
@@ -186,10 +186,9 @@ func TestGetIdentity(t *testing.T) {
 		t.Run(tc.desc, func(t *testing.T) {
 			_, client := k8sClient.NewFakeClientset()
 			backend, err := NewCRDBackend(CRDBackendConfiguration{
-				NodeName: "some-node",
-				Store:    nil,
-				Client:   client,
-				KeyFunc:  (&key.GlobalIdentity{}).PutKeyFromMap,
+				Store:   nil,
+				Client:  client,
+				KeyFunc: (&key.GlobalIdentity{}).PutKeyFromMap,
 			})
 			ctx := context.Background()
 			stopChan := make(chan struct{}, 1)
